@@ -23,6 +23,9 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------- دیکشنری وضعیت جستجو ----------
+waiting_for_symbol = {}
+
 # ---------- دیتابیس ----------
 conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
 c = conn.cursor()
@@ -120,6 +123,45 @@ def get_usd_irt():
         logger.error(f"USD/IRT error: {e}")
         return None
 
+# ========== توابع جدید برای ۲۰ ارز برتر و جستجوی دستی ==========
+def get_top_crypto(limit=20):
+    """دریافت ۲۰ ارز برتر از بایننس بر اساس حجم معاملات"""
+    try:
+        exchange = ccxt.binance()
+        tickers = exchange.fetch_tickers()
+        # فیلتر جفت‌ارزهای USDT و مرتب‌سازی بر اساس حجم
+        filtered = {k: v for k, v in tickers.items() if k.endswith('/USDT') and v.get('quoteVolume')}
+        sorted_tickers = sorted(filtered.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)[:limit]
+        result = []
+        for symbol, data in sorted_tickers:
+            result.append({
+                'symbol': symbol.replace('/USDT', ''),
+                'price': data['last'],
+                'change': data['percentage']
+            })
+        return result
+    except Exception as e:
+        logger.error(f"Top crypto error: {e}")
+        return None
+
+def get_crypto_price_by_symbol(symbol):
+    """دریافت قیمت یک ارز با نماد دلخواه (مثل ADA)"""
+    try:
+        exchange = ccxt.binance()
+        # اگر کاربر فقط نماد (مثل ADA) بدهد، آن را به جفت USDT تبدیل می‌کنیم
+        if not symbol.endswith('/USDT'):
+            symbol = f"{symbol.upper()}/USDT"
+        ticker = exchange.fetch_ticker(symbol)
+        return {
+            'price': ticker['last'],
+            'change': ticker['percentage'],
+            'high': ticker['high'],
+            'low': ticker['low']
+        }
+    except Exception as e:
+        logger.error(f"Symbol price error: {e}")
+        return None
+
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -142,6 +184,11 @@ def price_menu_keyboard():
         InlineKeyboardButton("🇪🇺 یورو/دلار", callback_data="price_eurusd"),
         InlineKeyboardButton("🥇 طلا (XAU/USD)", callback_data="price_gold"),
         InlineKeyboardButton("🇬🇧 پوند/دلار", callback_data="price_gbpusd")
+    )
+    # دکمه‌های جدید
+    keyboard.add(
+        InlineKeyboardButton("📋 ۲۰ ارز برتر", callback_data="price_top20"),
+        InlineKeyboardButton("🔍 جستجوی دستی", callback_data="price_search")
     )
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
@@ -191,7 +238,7 @@ def handle_price(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده. لطفاً اشتراک تهیه کنید.")
         return
-    bot.send_message(user_id, "📊 لطفاً یک ارز را انتخاب کنید:", reply_markup=price_menu_keyboard())
+    bot.send_message(user_id, "📊 لطفاً یک گزینه را انتخاب کنید:", reply_markup=price_menu_keyboard())
 
 @bot.message_handler(func=lambda msg: msg.text == "📰 اخبار امروز و هفته")
 def handle_news(message):
@@ -246,7 +293,12 @@ def analyze_step(message):
             else:
                 text = "❌ جفت‌ارز یافت نشد."
         else:
-            text = "❌ فرمت نام ارز نامعتبر است."
+            # احتمالاً کریپتو
+            info = get_crypto_price_by_symbol(symbol)
+            if info:
+                text = f"📊 **تحلیل {symbol.upper()}**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر: {info['change']:.2f}%\n📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}"
+            else:
+                text = "❌ ارز یا جفت‌ارز یافت نشد."
     bot.send_message(user_id, text)
 
 @bot.message_handler(func=lambda msg: msg.text == "🎯 پیشنهاد خرید")
@@ -342,14 +394,63 @@ def callback_price(call):
         else:
             reply = "❌ خطا در دریافت قیمت."
 
-    bot.answer_callback_query(call.id)
+    elif data == "price_top20":
+        top_list = get_top_crypto(20)
+        if not top_list:
+            reply = "❌ خطا در دریافت لیست ارزهای برتر."
+        else:
+            text = "📋 **۲۰ ارز برتر کریپتو (بر اساس حجم معاملات):**\n\n"
+            for idx, item in enumerate(top_list, 1):
+                change_emoji = "🟢" if item['change'] and item['change'] >= 0 else "🔴"
+                text += f"{idx}. {item['symbol']}: ${item['price']:,.2f} {change_emoji} {item['change']:.2f}%\n"
+            reply = text
+        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
+        bot.answer_callback_query(call.id)
+        return
+
+    elif data == "price_search":
+        bot.edit_message_text("🔍 **جستجوی قیمت ارز**\n\nلطفاً نام نماد ارز مورد نظر را تایپ کنید (مثلاً `ADA` یا `BTC`).", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        waiting_for_symbol[user_id] = True
+        bot.answer_callback_query(call.id)
+        return
+
     bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
+    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_main")
 def callback_back_main(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
+
+# ---------- هندلر پیام‌های متنی (برای جستجوی دستی قیمت) ----------
+@bot.message_handler(func=lambda msg: True)
+def handle_text_messages(message):
+    user_id = message.chat.id
+    text = message.text.strip()
+
+    # اگر کاربر در حالت جستجوی نماد است
+    if waiting_for_symbol.get(user_id, False):
+        # حذف وضعیت
+        waiting_for_symbol[user_id] = False
+        # دریافت قیمت
+        info = get_crypto_price_by_symbol(text)
+        if info:
+            reply = f"💰 **قیمت {text.upper()}**\n"
+            reply += f"قیمت: {info['price']:,.2f} $\n"
+            reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply += f"بالاترین: {info['high']:,.2f}\n"
+            reply += f"پایین‌ترین: {info['low']:,.2f}"
+            bot.send_message(user_id, reply, parse_mode='Markdown')
+        else:
+            bot.send_message(user_id, f"❌ نماد `{text}` یافت نشد. لطفاً از نمادهای معتبر استفاده کنید.", parse_mode='Markdown')
+        # بازگشت به منوی قیمت
+        bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
+        return
+
+    # سایر پیام‌ها را نادیده می‌گیریم تا تداخل با دکمه‌ها نداشته باشد
+    # (اختیاری: می‌توانید یک پیام راهنما بفرستید)
+    # bot.send_message(user_id, "لطفاً از دکمه‌های منو استفاده کنید.")
 
 # ---------- مسیرهای Webhook برای Flask ----------
 @app.route('/webhook', methods=['POST'])
