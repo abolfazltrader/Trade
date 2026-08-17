@@ -2,7 +2,6 @@ import os
 import logging
 import requests
 import ccxt
-import asyncio
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -216,20 +215,14 @@ def index():
     return "✅ ربات با Webhook فعال است!", 200
 
 @flask_app.route('/webhook', methods=['POST'])
-def webhook():
-    """دریافت درخواست از تلگرام و پردازش آن (همزمان)"""
+async def webhook():
+    """دریافت درخواست از تلگرام و پردازش آن (async)"""
     json_data = request.get_json(force=True)
     if not json_data:
         return "درخواست نامعتبر", 400
 
     update = Update.de_json(json_data, application.bot)
-    # پردازش به صورت همزمان با استفاده از asyncio.run()
-    try:
-        asyncio.run(application.process_update(update))
-    except Exception as e:
-        logging.error(f"خطا در پردازش: {e}")
-        return "خطا", 500
-
+    await application.process_update(update)
     return "OK", 200
 
 # ===== تنظیم Webhook =====
