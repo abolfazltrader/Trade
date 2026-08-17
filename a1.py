@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===== تنظیمات اولیه =====
-TOKEN = os.environ.get("8431738915:AAHDJ_nnuPWLuWZXnn4KqtLgBbEPDrXcOKo")
+TOKEN = os.environ.get("8431738915:AAGv9Swf_CwtB5sEnSQiKTp0g0hpOIEqLWU")
 if not TOKEN:
     raise ValueError("توکن ربات پیدا نشد! متغیر TELEGRAM_TOKEN را تنظیم کن.")
 
