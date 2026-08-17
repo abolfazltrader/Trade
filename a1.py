@@ -71,7 +71,6 @@ def price_menu():
 def back_button():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]])
 
-# ===== دستور /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     expiry = (datetime.now() + timedelta(days=7)).strftime('%Y/%m/%d')
@@ -83,7 +82,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu()
     )
 
-# ===== مدیریت دکمه‌ها =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -120,12 +118,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("⏳ به‌زودی اضافه می‌شود.", reply_markup=back_button())
 
-# ===== ایجاد Application =====
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(button_handler))
 
-# ===== Flask با پشتیبانی از async =====
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -141,7 +137,6 @@ async def webhook():
     await application.process_update(update)
     return "OK", 200
 
-# ===== تنظیم Webhook =====
 def set_webhook():
     base_url = "https://trade-i4js.onrender.com"  # ← آدرس خودت را بگذار
     webhook_url = f"{base_url}/webhook"
@@ -155,5 +150,4 @@ def set_webhook():
 if __name__ == '__main__':
     set_webhook()
     port = int(os.environ.get("PORT", 5000))
-    logging.info(f"🚀 وب‌سرویس روی پورت {port} روشن شد...")
     flask_app.run(host='0.0.0.0', port=port)
