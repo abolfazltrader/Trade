@@ -2,19 +2,19 @@ import os
 import logging
 import requests
 import ccxt
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===== تنظیمات اولیه =====
-TOKEN = os.environ.get("8431738915:AAGv9Swf_CwtB5sEnSQiKTp0g0hpOIEqLWU")
+TOKEN = os.environ.get("TELEGRAM_TOKEN")  # ✅ اصلاح: توکن از محیط خوانده می‌شود
 if not TOKEN:
     raise ValueError("توکن ربات پیدا نشد! متغیر TELEGRAM_TOKEN را تنظیم کن.")
 
 logging.basicConfig(level=logging.INFO)
 
-# ===== توابع دریافت قیمت (همان‌های قبل) =====
+# ===== توابع دریافت قیمت =====
 def get_crypto_price(symbol="BTC/USDT"):
     try:
         exchange = ccxt.binance()
@@ -51,7 +51,7 @@ def get_usd_irt():
     except:
         return None
 
-# ===== دکمه‌ها (همان‌های قبل) =====
+# ===== دکمه‌ها =====
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("📊 قیمت لحظه‌ای", callback_data="price")],
@@ -82,6 +82,7 @@ def back_button():
 # ===== دستور /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    expiry_date = (datetime.now() + timedelta(days=7)).strftime('%Y/%m/%d')  # ✅ اصلاح: محاسبه ۷ روز
     await update.message.reply_text(
         f"🎉 سلام {user.first_name}!\n"
         "به ربات تحلیلگر بازار خوش آمدی.\n\n"
@@ -92,12 +93,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   - سیگنال‌های معاملاتی\n"
         "   - تحلیل ارز دلخواه\n"
         "   - پیشنهاد ارزهای مناسب خرید\n\n"
-        f"📅 تاریخ انقضا: {datetime.now().strftime('%Y/%m/%d')} + ۷ روز\n"
+        f"📅 تاریخ انقضا: {expiry_date}\n"
         "از دکمه‌های زیر استفاده کن:",
         reply_markup=main_menu()
     )
 
-# ===== مدیریت دکمه‌ها (همان‌های قبل) =====
+# ===== مدیریت دکمه‌ها =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -218,28 +219,22 @@ def index():
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
     """دریافت درخواست از تلگرام و پردازش آن"""
-    # دریافت داده JSON از درخواست
     json_data = request.get_json(force=True)
     if not json_data:
         return "درخواست نامعتبر", 400
 
-    # ایجاد شیء Update از داده دریافتی
     update = Update.de_json(json_data, None)
-    
-    # پردازش به‌روزرسانی توسط Application
     app = create_application()
     await app.process_update(update)
-    
     return "OK", 200
 
 # ===== تنظیم Webhook در تلگرام =====
 def set_webhook():
     """تنظیم Webhook برای اولین بار"""
-    # آدرس عمومی سرویس (در Render از متغیر محیطی استفاده کن)
-    base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app-name.onrender.com")
+    # ✅ اصلاح: آدرس واقعی سرویس را مستقیماً وارد کن
+    base_url = "https://trade-i4js.onrender.com"  # ← این را به آدرس خودت تغییر بده
     webhook_url = f"{base_url}/webhook"
     
-    # استفاده از requests برای تنظیم webhook
     url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
     response = requests.post(url, json={"url": webhook_url})
     
@@ -250,10 +245,7 @@ def set_webhook():
 
 # ===== ورودی اصلی =====
 if __name__ == '__main__':
-    # تنظیم Webhook در اولین اجرا
     set_webhook()
-    
-    # اجرای Flask برای دریافت Webhook
     port = int(os.environ.get("PORT", 5000))
     logging.info(f"🚀 وب‌سرویس Webhook روی پورت {port} روشن شد...")
     flask_app.run(host='0.0.0.0', port=port)
