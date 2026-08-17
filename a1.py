@@ -203,12 +203,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu()
         )
 
-# ===== ایجاد Application به صورت سراسری (یک بار برای همیشه) =====
+# ===== ایجاد Application به صورت سراسری =====
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(button_handler))
 
-# ===== Flask برای دریافت Webhook =====
+# ===== Flask =====
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -217,20 +217,24 @@ def index():
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """دریافت درخواست از تلگرام و پردازش آن به صورت غیرهمزمان"""
+    """دریافت درخواست از تلگرام و پردازش آن (همزمان)"""
     json_data = request.get_json(force=True)
     if not json_data:
         return "درخواست نامعتبر", 400
 
     update = Update.de_json(json_data, application.bot)
-    # پردازش را به صورت غیرهمزمان اجرا کن تا درخواست Flask مسدود نشود
-    asyncio.create_task(application.process_update(update))
+    # پردازش به صورت همزمان با استفاده از asyncio.run()
+    try:
+        asyncio.run(application.process_update(update))
+    except Exception as e:
+        logging.error(f"خطا در پردازش: {e}")
+        return "خطا", 500
+
     return "OK", 200
 
-# ===== تنظیم Webhook در تلگرام =====
+# ===== تنظیم Webhook =====
 def set_webhook():
-    """تنظیم Webhook با آدرس واقعی سرویس"""
-    base_url = "https://trade-i4js.onrender.com"  # ← آدرس خودت را اینجا بگذار
+    base_url = "https://trade-i4js.onrender.com"  # ← آدرس خودت را بگذار
     webhook_url = f"{base_url}/webhook"
     url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
     response = requests.post(url, json={"url": webhook_url})
@@ -243,5 +247,5 @@ def set_webhook():
 if __name__ == '__main__':
     set_webhook()
     port = int(os.environ.get("PORT", 5000))
-    logging.info(f"🚀 وب‌سرویس Webhook روی پورت {port} روشن شد...")
+    logging.info(f"🚀 وب‌سرویس روی پورت {port} روشن شد...")
     flask_app.run(host='0.0.0.0', port=port)
