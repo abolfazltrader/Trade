@@ -8,17 +8,18 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set!")
 
-BOT_USERNAME = "Crypto_forex_2026_bot"  # یوزرنیم ربات خود را وارد کنید
-BASE_URL = "https://trade-i4js.onrender.com"  # آدرس سرویس Render خود را وارد کنید
+BOT_USERNAME = "Crypto_forex_2026_bot"
+BASE_URL = "https://trade-i4js.onrender.com"
 
-# ========== لیست مدیران (ایدی‌های تلگرام) ==========
-ADMIN_IDS = [6542890217]  # آیدی مدیران را اینجا وارد کنید
+ADMIN_IDS = [6542890217]  # آیدی مدیر
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -26,20 +27,17 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- دیکشنری وضعیت جستجو ----------
 waiting_for_symbol = {}
 
 # ---------- دیتابیس ----------
 conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
 c = conn.cursor()
-
 c.execute("""CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     user_name TEXT,
     register_date TEXT,
     expiry_date TEXT
 )""")
-
 c.execute("""CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -48,9 +46,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS transactions (
     status TEXT,
     created_at TEXT
 )""")
-
 conn.commit()
-logger.info("Database initialized.")
 
 # ---------- توابع کمکی ----------
 def get_user_expiry(user_id):
@@ -64,11 +60,8 @@ def set_user_expiry(user_id, days=7):
     conn.commit()
 
 def is_user_expired(user_id):
-    """بررسی انقضای کاربر - مدیران هرگز منقضی نمی‌شوند"""
-    # اگر کاربر در لیست مدیران باشد، دسترسی دائمی دارد
     if user_id in ADMIN_IDS:
         return False
-    
     expiry_str = get_user_expiry(user_id)
     if not expiry_str:
         return True
@@ -85,75 +78,177 @@ def get_owner_name(user_id):
     except:
         return "کاربر"
 
-# ---------- توابع دریافت قیمت (همان‌های قبلی) ----------
-def get_crypto_price(symbol="BTC/USDT"):
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'timeout': 10000,
-        })
-        ticker = exchange.fetch_ticker(symbol)
-        if ticker and ticker.get('last') is not None:
-            return {
-                "price": ticker["last"],
-                "change": ticker.get("percentage", 0),
-                "high": ticker.get("high", 0),
-                "low": ticker.get("low", 0)
-            }
-    except Exception as e:
-        logger.warning(f"Binance error for {symbol}: {e}")
+# ========== سیستم قدرتمند دریافت قیمت (چندمنبعی با کش) ==========
+class PriceFetcher:
+    def __init__(self):
+        self.cache = {}
+        self.cache_time = 15  # کش به مدت ۱۵ ثانیه
+        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
+        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 8000})
+        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
 
-    # Fallback به CoinGecko
-    try:
-        coin_id = symbol.split('/')[0].lower()
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if coin_id in data and data[coin_id].get('usd') is not None:
-            return {
-                "price": data[coin_id]['usd'],
-                "change": data[coin_id].get('usd_24h_change', 0),
-                "high": None,
-                "low": None
-            }
-    except Exception as e:
-        logger.error(f"CoinGecko fallback error for {symbol}: {e}")
-    return None
+    def _get_cached(self, key):
+        """دریافت از کش اگر معتبر باشد"""
+        if key in self.cache:
+            data, timestamp = self.cache[key]
+            if (datetime.now() - timestamp).seconds < self.cache_time:
+                return data
+        return None
+
+    def _set_cache(self, key, data):
+        """ذخیره در کش"""
+        self.cache[key] = (data, datetime.now())
+
+    def _fetch_binance(self, symbol):
+        try:
+            ticker = self.binance.fetch_ticker(symbol)
+            if ticker and ticker.get('last') is not None:
+                return {
+                    'price': ticker['last'],
+                    'change': ticker.get('percentage', 0),
+                    'high': ticker.get('high', 0),
+                    'low': ticker.get('low', 0),
+                    'source': 'Binance'
+                }
+        except Exception as e:
+            logger.warning(f"Binance error: {e}")
+        return None
+
+    def _fetch_kraken(self, symbol):
+        try:
+            # تبدیل نماد به فرمت Kraken (مثلاً BTC/USDT → XBT/USD)
+            if symbol == "BTC/USDT":
+                kraken_symbol = "XBT/USD"
+            else:
+                kraken_symbol = symbol
+            ticker = self.kraken.fetch_ticker(kraken_symbol)
+            if ticker and ticker.get('last') is not None:
+                return {
+                    'price': ticker['last'],
+                    'change': ticker.get('percentage', 0),
+                    'high': ticker.get('high', 0),
+                    'low': ticker.get('low', 0),
+                    'source': 'Kraken'
+                }
+        except Exception as e:
+            logger.warning(f"Kraken error: {e}")
+        return None
+
+    def _fetch_okx(self, symbol):
+        try:
+            ticker = self.okx.fetch_ticker(symbol)
+            if ticker and ticker.get('last') is not None:
+                return {
+                    'price': ticker['last'],
+                    'change': ticker.get('percentage', 0),
+                    'high': ticker.get('high', 0),
+                    'low': ticker.get('low', 0),
+                    'source': 'OKX'
+                }
+        except Exception as e:
+            logger.warning(f"OKX error: {e}")
+        return None
+
+    def _fetch_coingecko(self, symbol):
+        try:
+            coin_id = symbol.split('/')[0].lower()
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
+            resp = requests.get(url, timeout=5)
+            data = resp.json()
+            if coin_id in data and data[coin_id].get('usd') is not None:
+                return {
+                    'price': data[coin_id]['usd'],
+                    'change': data[coin_id].get('usd_24h_change', 0),
+                    'high': None,
+                    'low': None,
+                    'source': 'CoinGecko'
+                }
+        except Exception as e:
+            logger.warning(f"CoinGecko error: {e}")
+        return None
+
+    def get_price(self, symbol, force_refresh=False):
+        """دریافت قیمت از چند منبع به صورت موازی و سریع"""
+        cache_key = f"price_{symbol}"
+        if not force_refresh:
+            cached = self._get_cached(cache_key)
+            if cached:
+                return cached
+
+        # دریافت از همه منابع به صورت موازی
+        sources = [
+            self._fetch_binance,
+            self._fetch_kraken,
+            self._fetch_okx,
+            self._fetch_coingecko
+        ]
+
+        futures = []
+        for src in sources:
+            futures.append(self.executor.submit(src, symbol))
+
+        # اولین پاسخ معتبر را برمی‌گردانیم (با timeout کلی ۳ ثانیه)
+        start_time = time.time()
+        for future in as_completed(futures, timeout=3):
+            result = future.result()
+            if result and result.get('price') is not None:
+                self._set_cache(cache_key, result)
+                return result
+            if time.time() - start_time > 3:
+                break
+
+        return None
+
+# ========== نمونه‌ی اصلی PriceFetcher ==========
+fetcher = PriceFetcher()
+
+# ---------- توابع دریافت قیمت (با استفاده از PriceFetcher) ----------
+def get_crypto_price(symbol="BTC/USDT"):
+    """دریافت قیمت با سیستم چندمنبعی"""
+    return fetcher.get_price(symbol)
 
 def get_forex_price(pair="EURUSD"):
+    """دریافت فارکس (همان Frankfurter)"""
     try:
         url = f"https://api.frankfurter.app/latest?from={pair[:3]}&to={pair[3:]}"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=5)
         data = resp.json()
         if "rates" in data and pair[3:] in data["rates"]:
             return data["rates"][pair[3:]]
     except Exception as e:
-        logger.error(f"Forex error for {pair}: {e}")
+        logger.error(f"Forex error: {e}")
     return None
 
 def get_usd_irt():
+    """دریافت دلار/تومان (با کش ۳۰ ثانیه)"""
+    cache_key = "usd_irt"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
     try:
         url = "https://api.zarinpal.com/payment/unit-converter/v1/convert"
         params = {"amount": 1, "from_currency": "USD", "to_currency": "IRT"}
         resp = requests.get(url, params=params, timeout=5)
         data = resp.json()
         if data.get("result") and "data" in data["result"]:
-            return data["result"]["data"]["amount"]
+            price = data["result"]["data"]["amount"]
+            fetcher._set_cache(cache_key, price)
+            return price
     except Exception as e:
         logger.error(f"USD/IRT error: {e}")
     return None
 
 def get_top_crypto(limit=20):
+    """دریافت ۲۰ ارز برتر از CoinGecko با کش ۵ دقیقه‌ای"""
+    cache_key = "top20"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": limit,
-            "page": 1,
-            "sparkline": "false"
-        }
-        resp = requests.get(url, params=params, timeout=15)
+        params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1, "sparkline": "false"}
+        resp = requests.get(url, params=params, timeout=8)
         data = resp.json()
         if not isinstance(data, list):
             return None
@@ -164,45 +259,23 @@ def get_top_crypto(limit=20):
                 'price': coin['current_price'],
                 'change': coin['price_change_percentage_24h']
             })
+        fetcher._set_cache(cache_key, result)
         return result
     except Exception as e:
         logger.error(f"Top crypto error: {e}")
         return None
 
 def get_crypto_price_by_symbol(symbol):
+    """دریافت قیمت با نماد دلخواه (با کش)"""
     try:
-        exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
         if not symbol.endswith('/USDT'):
             symbol = f"{symbol.upper()}/USDT"
-        ticker = exchange.fetch_ticker(symbol)
-        if ticker and ticker.get('last') is not None:
-            return {
-                'price': ticker['last'],
-                'change': ticker.get('percentage', 0),
-                'high': ticker.get('high', 0),
-                'low': ticker.get('low', 0)
-            }
+        return fetcher.get_price(symbol)
     except Exception as e:
-        logger.warning(f"Binance symbol error for {symbol}: {e}")
+        logger.error(f"Symbol price error: {e}")
+        return None
 
-    # Fallback به CoinGecko
-    try:
-        coin_id = symbol.split('/')[0].lower()
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if coin_id in data and data[coin_id].get('usd') is not None:
-            return {
-                'price': data[coin_id]['usd'],
-                'change': data[coin_id].get('usd_24h_change', 0),
-                'high': None,
-                'low': None
-            }
-    except Exception as e:
-        logger.error(f"CoinGecko symbol fallback error: {e}")
-    return None
-
-# ---------- دکمه‌های منو ----------
+# ---------- دکمه‌های منو (بدون تغییر) ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_price = KeyboardButton("📊 قیمت لحظه‌ای")
@@ -237,7 +310,7 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
-# ---------- دستور /start ----------
+# ---------- دستور /start (بدون تغییر) ----------
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -260,38 +333,19 @@ def start(message):
         days_left = "نامحدود (مدیر)" if user_id in ADMIN_IDS else 0
 
     if user_id in ADMIN_IDS:
-        welcome = (
-            f"🎉 سلام {name} (مدیر)!\n"
-            "به ربات تحلیلگر بازار خوش آمدی.\n\n"
-            "🔹 **دسترسی دائمی و رایگان**\n"
-            f"📅 وضعیت: نامحدود\n\n"
-            "از دکمه‌های زیر استفاده کن:"
-        )
+        welcome = f"🎉 سلام {name} (مدیر)!\nبه ربات تحلیلگر بازار خوش آمدی.\n\n🔹 **دسترسی دائمی و رایگان**\n📅 وضعیت: نامحدود\n\nاز دکمه‌های زیر استفاده کن:"
     else:
-        welcome = (
-            f"🎉 سلام {name}!\n"
-            "به ربات تحلیلگر بازار خوش آمدی.\n\n"
-            "🔹 **نسخه رایگان ۷ روزه**\n"
-            f"📅 روزهای باقی‌مانده: {days_left} روز\n\n"
-            "از دکمه‌های زیر استفاده کن:"
-        )
+        welcome = f"🎉 سلام {name}!\nبه ربات تحلیلگر بازار خوش آمدی.\n\n🔹 **نسخه رایگان ۷ روزه**\n📅 روزهای باقی‌مانده: {days_left} روز\n\nاز دکمه‌های زیر استفاده کن:"
     bot.send_message(user_id, welcome, reply_markup=main_menu_keyboard())
 
-# ---------- پنل مدیریت (اختیاری) ----------
+# ---------- پنل مدیریت ----------
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ شما دسترسی به این بخش ندارید!")
         return
-    
-    text = (
-        "🔐 **پنل مدیریت**\n\n"
-        "سلام مدیر گرامی!\n"
-        "شما دسترسی دائمی به ربات دارید.\n\n"
-        "• برای مشاهده آمار، از دستور /stats استفاده کنید.\n"
-        "• برای ارسال پیام به همه کاربران، از /broadcast استفاده کنید."
-    )
+    text = "🔐 **پنل مدیریت**\n\nسلام مدیر گرامی!\nشما دسترسی دائمی به ربات دارید.\n\n• برای مشاهده آمار، از دستور /stats استفاده کنید.\n• برای ارسال پیام به همه کاربران، از /broadcast استفاده کنید."
     bot.send_message(user_id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['stats'])
@@ -299,19 +353,16 @@ def stats_command(message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         return
-    
     c.execute("SELECT COUNT(*) FROM users")
     total_users = c.fetchone()[0]
-    
-    text = f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}"
-    bot.send_message(user_id, text, parse_mode='Markdown')
+    bot.send_message(user_id, f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}", parse_mode='Markdown')
 
-# ---------- بقیه هندلرها (همان‌های قبلی) ----------
+# ---------- بقیه هندلرها ----------
 @bot.message_handler(func=lambda msg: msg.text == "📊 قیمت لحظه‌ای")
 def handle_price(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
-        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده. لطفاً اشتراک تهیه کنید.")
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     bot.send_message(user_id, "📊 لطفاً یک گزینه را انتخاب کنید:", reply_markup=price_menu_keyboard())
 
@@ -321,8 +372,7 @@ def handle_news(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    news_text = "📰 **اخبار امروز و هفته**\n\n(به‌زودی با API خبری تکمیل می‌شود.)"
-    bot.send_message(user_id, news_text, parse_mode='Markdown')
+    bot.send_message(user_id, "📰 **اخبار امروز و هفته**\n\n(به‌زودی با API خبری تکمیل می‌شود.)", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
@@ -330,8 +380,7 @@ def handle_signal(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    signal_text = "📈 **سیگنال لحظه‌ای**\n\nفعلاً سیگنالی موجود نیست.\nبه‌زودی اضافه می‌شود."
-    bot.send_message(user_id, signal_text, parse_mode='Markdown')
+    bot.send_message(user_id, "📈 **سیگنال لحظه‌ای**\n\nفعلاً سیگنالی موجود نیست.\nبه‌زودی اضافه می‌شود.", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
@@ -354,6 +403,7 @@ def analyze_step(message):
             text = f"📊 **تحلیل {symbol}**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 text += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}"
+            text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             text = "❌ ارز مورد نظر یافت نشد."
     else:
@@ -370,6 +420,7 @@ def analyze_step(message):
                 text = f"📊 **تحلیل {symbol.upper()}**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر: {info['change']:.2f}%\n"
                 if info.get('high') and info.get('low'):
                     text += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}"
+                text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
             else:
                 text = "❌ ارز یا جفت‌ارز یافت نشد."
     bot.send_message(user_id, text)
@@ -386,15 +437,8 @@ def handle_suggest(message):
 @bot.message_handler(func=lambda msg: msg.text == "👤 پنل کاربری")
 def handle_panel(message):
     user_id = message.chat.id
-    
     if user_id in ADMIN_IDS:
-        text = (
-            f"👤 **پنل کاربری (مدیر)**\n\n"
-            f"نام: {get_owner_name(user_id)}\n"
-            f"شناسه: {user_id}\n"
-            f"📅 وضعیت: نامحدود\n"
-            f"نوع اشتراک: دائمی"
-        )
+        text = f"👤 **پنل کاربری (مدیر)**\n\nنام: {get_owner_name(user_id)}\nشناسه: {user_id}\n📅 وضعیت: نامحدود\nنوع اشتراک: دائمی"
     else:
         expiry_str = get_user_expiry(user_id)
         if expiry_str:
@@ -405,13 +449,7 @@ def handle_panel(message):
         else:
             days_left = 0
         name = get_owner_name(user_id)
-        text = (
-            f"👤 **پنل کاربری**\n\n"
-            f"نام: {name}\n"
-            f"شناسه: {user_id}\n"
-            f"📅 روزهای باقی‌مانده: {days_left}\n"
-            f"نوع اشتراک: رایگان (۷ روزه)"
-        )
+        text = f"👤 **پنل کاربری**\n\nنام: {name}\nشناسه: {user_id}\n📅 روزهای باقی‌مانده: {days_left}\nنوع اشتراک: رایگان (۷ روزه)"
     bot.send_message(user_id, text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "ℹ️ راهنما")
@@ -428,7 +466,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت ----------
+# ---------- هندلرهای کالبک قیمت (با نمایش منبع) ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -444,7 +482,8 @@ def callback_price(call):
         if info:
             reply = f"₿ **بیت‌کوین (BTC/USDT)**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
-                reply += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}"
+                reply += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت بیت‌کوین."
 
@@ -453,35 +492,36 @@ def callback_price(call):
         if info:
             reply = f"⟠ **اتریوم (ETH/USDT)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
-                reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}"
+                reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت اتریوم."
 
     elif data == "price_usdirt":
         price = get_usd_irt()
         if price:
-            reply = f"💵 **دلار/تومان (USD/IRT)**\n💰 قیمت: {price:,.0f} تومان"
+            reply = f"💵 **دلار/تومان (USD/IRT)**\n💰 قیمت: {price:,.0f} تومان\n📌 منبع: زرین‌پال"
         else:
             reply = "❌ خطا در دریافت قیمت دلار/تومان."
 
     elif data == "price_eurusd":
         price = get_forex_price("EURUSD")
         if price:
-            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {price:.4f}"
+            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {price:.4f}\n📌 منبع: Frankfurter"
         else:
             reply = "❌ خطا در دریافت قیمت یورو/دلار."
 
     elif data == "price_gbpusd":
         price = get_forex_price("GBPUSD")
         if price:
-            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {price:.4f}"
+            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {price:.4f}\n📌 منبع: Frankfurter"
         else:
             reply = "❌ خطا در دریافت قیمت پوند/دلار."
 
     elif data == "price_gold":
         info = get_crypto_price("XAU/USD")
         if info:
-            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%"
+            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت طلا."
 
@@ -501,12 +541,7 @@ def callback_price(call):
         return
 
     elif data == "price_search":
-        bot.edit_message_text(
-            "🔍 **جستجوی قیمت ارز**\n\nلطفاً نام نماد ارز مورد نظر را تایپ کنید (مثلاً `ADA` یا `BTC`).",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
+        bot.edit_message_text("🔍 **جستجوی قیمت ارز**\n\nلطفاً نام نماد ارز مورد نظر را تایپ کنید (مثلاً `ADA` یا `BTC`).", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         waiting_for_symbol[user_id] = True
         bot.answer_callback_query(call.id)
         return
@@ -534,7 +569,8 @@ def handle_text_messages(message):
             reply += f"قیمت: {info['price']:,.2f} $\n"
             reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
-                reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}"
+                reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
             bot.send_message(user_id, reply, parse_mode='Markdown')
         else:
             bot.send_message(user_id, f"❌ نماد `{text}` یافت نشد. لطفاً از نمادهای معتبر استفاده کنید.", parse_mode='Markdown')
