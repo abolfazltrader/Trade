@@ -81,7 +81,7 @@ def get_owner_name(user_id):
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
-        self.cache_time = 30  # افزایش کش به ۳۰ ثانیه برای سرعت بیشتر
+        self.cache_time = 30
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 6000})
         self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 6000})
@@ -172,7 +172,6 @@ class PriceFetcher:
             if cached:
                 return cached
 
-        # اولویت با سریع‌ترین منبع (Binance)
         sources = [
             self._fetch_binance,
             self._fetch_okx,
@@ -282,30 +281,12 @@ def price_menu_keyboard():
         InlineKeyboardButton("🥇 طلا (XAU/USD)", callback_data="price_gold"),
         InlineKeyboardButton("🇬🇧 پوند/دلار", callback_data="price_gbpusd")
     )
-    keyboard.add(
-        InlineKeyboardButton("🔍 جستجوی دستی و لیست برترین‌ها", callback_data="price_search")
-    )
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
 def back_to_main_keyboard():
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
-    return keyboard
-
-# ========== منوی انتخاب از ۲۰ ارز برتر ==========
-def top20_menu_keyboard():
-    top_list = get_top_crypto(20)
-    if not top_list:
-        keyboard = InlineKeyboardMarkup()
-        keyboard.add(InlineKeyboardButton("❌ خطا در دریافت لیست", callback_data="back_main"))
-        return keyboard
-
-    keyboard = InlineKeyboardMarkup(row_width=3)
-    for item in top_list:
-        symbol = item['symbol']
-        keyboard.add(InlineKeyboardButton(symbol, callback_data=f"top_select_{symbol}"))
-    keyboard.add(InlineKeyboardButton("🔙 بازگشت به منوی قیمت", callback_data="back_to_price"))
     return keyboard
 
 # ---------- دستور /start ----------
@@ -523,128 +504,14 @@ def callback_price(call):
         else:
             reply = "❌ خطا در دریافت قیمت طلا."
 
-    elif data == "price_search":
-        # نمایش منوی ۲۰ ارز برتر + امکان جستجوی دستی
-        top_keyboard = top20_menu_keyboard()
-        bot.edit_message_text(
-            "🔍 **جستجوی دستی یا انتخاب از لیست برترین‌ها**\n\n"
-            "• روی یکی از دکمه‌های زیر کلیک کنید تا قیمت آن را ببینید.\n"
-            "• یا نام نماد مورد نظر (مثلاً `ADA` یا `BTC`) را تایپ کنید.",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=top_keyboard,
-            parse_mode='Markdown'
-        )
-        waiting_for_symbol[user_id] = True
-        bot.answer_callback_query(call.id)
-        return
-
     bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
     bot.answer_callback_query(call.id)
-
-# ========== کالبک انتخاب ارز از لیست ۲۰ تایی ==========
-@bot.callback_query_handler(func=lambda call: call.data.startswith("top_select_"))
-def callback_top_select(call):
-    user_id = call.from_user.id
-    if is_user_expired(user_id):
-        bot.answer_callback_query(call.id, "⏰ دوره آزمایشی شما به پایان رسیده.", show_alert=True)
-        return
-
-    symbol = call.data.split("top_select_")[1]
-
-    # مدیریت ارزهای خاص
-    if symbol == "USDT" or symbol == "USDC":
-        reply = f"💰 **قیمت {symbol}**\nقیمت: 1.00 $\nتغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
-        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
-        bot.answer_callback_query(call.id)
-        return
-
-    if symbol == "STETH":
-        # stETH قیمت نزدیک به ETH دارد
-        pair = "ETH/USDT"
-        display_name = "stETH (معادل اتریوم)"
-        info = get_crypto_price(pair)
-        if info:
-            reply = f"💰 **قیمت {display_name}**\n"
-            reply += f"قیمت: {info['price']:,.2f} $\n"
-            reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
-            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-        else:
-            reply = "❌ خطا در دریافت قیمت stETH."
-        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
-        bot.answer_callback_query(call.id)
-        return
-
-    # سایر ارزها به صورت معمول
-    pair = f"{symbol}/USDT"
-    info = get_crypto_price(pair)
-    if info:
-        reply = f"💰 **قیمت {symbol}**\n"
-        reply += f"قیمت: {info['price']:,.2f} $\n"
-        reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
-        if info.get('high') and info.get('low'):
-            reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
-        reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-    else:
-        reply = f"❌ خطا در دریافت قیمت {symbol}."
-
-    bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_price")
-def callback_back_to_price(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text("📊 لطفاً یک گزینه را انتخاب کنید:", call.message.chat.id, call.message.message_id, reply_markup=price_menu_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_main")
 def callback_back_main(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
-
-# ---------- هندلر پیام‌های متنی (جستجوی دستی) ----------
-@bot.message_handler(func=lambda msg: True)
-def handle_text_messages(message):
-    user_id = message.chat.id
-    text = message.text.strip()
-
-    if waiting_for_symbol.get(user_id, False):
-        waiting_for_symbol[user_id] = False
-        # اگر کاربر عدد یا کاراکتر خاص وارد کرده، پیام راهنما
-        if not text.isalpha() and '/' not in text:
-            bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید (مثلاً `ADA` یا `BTC`).", parse_mode='Markdown')
-            bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
-            return
-
-        symbol = text.upper()
-
-        # مدیریت استیبل‌کوین‌ها و stETH
-        if symbol == "USDT" or symbol == "USDC":
-            reply = f"💰 **قیمت {symbol}**\nقیمت: 1.00 $\nتغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
-            bot.send_message(user_id, reply, parse_mode='Markdown')
-        elif symbol == "STETH":
-            info = get_crypto_price("ETH/USDT")
-            if info:
-                reply = f"💰 **قیمت stETH (معادل اتریوم)**\nقیمت: {info['price']:,.2f} $\nتغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
-                bot.send_message(user_id, reply, parse_mode='Markdown')
-            else:
-                bot.send_message(user_id, "❌ خطا در دریافت قیمت stETH.")
-        else:
-            info = get_crypto_price_by_symbol(text)
-            if info:
-                reply = f"💰 **قیمت {text.upper()}**\n"
-                reply += f"قیمت: {info['price']:,.2f} $\n"
-                reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
-                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-                bot.send_message(user_id, reply, parse_mode='Markdown')
-            else:
-                bot.send_message(user_id, f"❌ نماد `{text}` یافت نشد. لطفاً از نمادهای معتبر استفاده کنید.", parse_mode='Markdown')
-        bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
-        return
 
 # ---------- مسیرهای Webhook ----------
 @app.route('/webhook', methods=['POST'])
