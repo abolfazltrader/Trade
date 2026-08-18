@@ -17,6 +17,9 @@ if not TOKEN:
 BOT_USERNAME = "Crypto_forex_2026_bot"  # یوزرنیم ربات خود را وارد کنید
 BASE_URL = "https://trade-i4js.onrender.com"  # آدرس سرویس Render خود را وارد کنید
 
+# ========== لیست مدیران (ایدی‌های تلگرام) ==========
+ADMIN_IDS = [6542890217]  # آیدی مدیران را اینجا وارد کنید
+
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -61,6 +64,11 @@ def set_user_expiry(user_id, days=7):
     conn.commit()
 
 def is_user_expired(user_id):
+    """بررسی انقضای کاربر - مدیران هرگز منقضی نمی‌شوند"""
+    # اگر کاربر در لیست مدیران باشد، دسترسی دائمی دارد
+    if user_id in ADMIN_IDS:
+        return False
+    
     expiry_str = get_user_expiry(user_id)
     if not expiry_str:
         return True
@@ -77,9 +85,8 @@ def get_owner_name(user_id):
     except:
         return "کاربر"
 
-# ---------- توابع دریافت قیمت (با خطاگیری و fallback) ----------
+# ---------- توابع دریافت قیمت (همان‌های قبلی) ----------
 def get_crypto_price(symbol="BTC/USDT"):
-    """دریافت قیمت از بایننس، در صورت خطا از CoinGecko"""
     try:
         exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -111,7 +118,6 @@ def get_crypto_price(symbol="BTC/USDT"):
             }
     except Exception as e:
         logger.error(f"CoinGecko fallback error for {symbol}: {e}")
-
     return None
 
 def get_forex_price(pair="EURUSD"):
@@ -138,7 +144,6 @@ def get_usd_irt():
     return None
 
 def get_top_crypto(limit=20):
-    """دریافت ۲۰ ارز برتر از CoinGecko بر اساس مارکت‌کپ"""
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
@@ -165,9 +170,7 @@ def get_top_crypto(limit=20):
         return None
 
 def get_crypto_price_by_symbol(symbol):
-    """دریافت قیمت یک ارز با نماد دلخواه (مثل ADA) با fallback"""
     try:
-        # ابتدا با بایننس
         exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
         if not symbol.endswith('/USDT'):
             symbol = f"{symbol.upper()}/USDT"
@@ -197,7 +200,6 @@ def get_crypto_price_by_symbol(symbol):
             }
     except Exception as e:
         logger.error(f"CoinGecko symbol fallback error: {e}")
-
     return None
 
 # ---------- دکمه‌های منو ----------
@@ -245,33 +247,71 @@ def start(message):
     c.execute("UPDATE users SET user_name = ? WHERE user_id = ?", (name, user_id))
     conn.commit()
 
-    if not get_user_expiry(user_id):
+    if not get_user_expiry(user_id) and user_id not in ADMIN_IDS:
         set_user_expiry(user_id, 7)
 
     expiry_date = get_user_expiry(user_id)
-    if expiry_date:
+    if expiry_date and user_id not in ADMIN_IDS:
         expiry_dt = datetime.fromisoformat(expiry_date)
         days_left = (expiry_dt - datetime.now()).days
         if days_left < 0:
             days_left = 0
     else:
-        days_left = 0
+        days_left = "نامحدود (مدیر)" if user_id in ADMIN_IDS else 0
 
-    welcome = (
-        f"🎉 سلام {name}!\n"
-        "به ربات تحلیلگر بازار خوش آمدی.\n\n"
-        "🔹 **نسخه رایگان ۷ روزه**\n"
-        f"📅 روزهای باقی‌مانده: {days_left} روز\n\n"
-        "از دکمه‌های زیر استفاده کن:"
-    )
+    if user_id in ADMIN_IDS:
+        welcome = (
+            f"🎉 سلام {name} (مدیر)!\n"
+            "به ربات تحلیلگر بازار خوش آمدی.\n\n"
+            "🔹 **دسترسی دائمی و رایگان**\n"
+            f"📅 وضعیت: نامحدود\n\n"
+            "از دکمه‌های زیر استفاده کن:"
+        )
+    else:
+        welcome = (
+            f"🎉 سلام {name}!\n"
+            "به ربات تحلیلگر بازار خوش آمدی.\n\n"
+            "🔹 **نسخه رایگان ۷ روزه**\n"
+            f"📅 روزهای باقی‌مانده: {days_left} روز\n\n"
+            "از دکمه‌های زیر استفاده کن:"
+        )
     bot.send_message(user_id, welcome, reply_markup=main_menu_keyboard())
 
-# ---------- هندلر دکمه‌های اصلی ----------
+# ---------- پنل مدیریت (اختیاری) ----------
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        bot.reply_to(message, "❌ شما دسترسی به این بخش ندارید!")
+        return
+    
+    text = (
+        "🔐 **پنل مدیریت**\n\n"
+        "سلام مدیر گرامی!\n"
+        "شما دسترسی دائمی به ربات دارید.\n\n"
+        "• برای مشاهده آمار، از دستور /stats استفاده کنید.\n"
+        "• برای ارسال پیام به همه کاربران، از /broadcast استفاده کنید."
+    )
+    bot.send_message(user_id, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+    
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    
+    text = f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}"
+    bot.send_message(user_id, text, parse_mode='Markdown')
+
+# ---------- بقیه هندلرها (همان‌های قبلی) ----------
 @bot.message_handler(func=lambda msg: msg.text == "📊 قیمت لحظه‌ای")
 def handle_price(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
-        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده. لطفاً اشتراک تهیه کنید.")
         return
     bot.send_message(user_id, "📊 لطفاً یک گزینه را انتخاب کنید:", reply_markup=price_menu_keyboard())
 
@@ -308,7 +348,6 @@ def analyze_step(message):
     if not symbol:
         bot.send_message(user_id, "❌ نام ارز معتبر وارد کنید.")
         return
-    # تلاش برای دریافت قیمت
     if "/" in symbol:
         info = get_crypto_price(symbol)
         if info:
@@ -347,22 +386,32 @@ def handle_suggest(message):
 @bot.message_handler(func=lambda msg: msg.text == "👤 پنل کاربری")
 def handle_panel(message):
     user_id = message.chat.id
-    expiry_str = get_user_expiry(user_id)
-    if expiry_str:
-        expiry_dt = datetime.fromisoformat(expiry_str)
-        days_left = (expiry_dt - datetime.now()).days
-        if days_left < 0:
-            days_left = 0
+    
+    if user_id in ADMIN_IDS:
+        text = (
+            f"👤 **پنل کاربری (مدیر)**\n\n"
+            f"نام: {get_owner_name(user_id)}\n"
+            f"شناسه: {user_id}\n"
+            f"📅 وضعیت: نامحدود\n"
+            f"نوع اشتراک: دائمی"
+        )
     else:
-        days_left = 0
-    name = get_owner_name(user_id)
-    text = (
-        f"👤 **پنل کاربری**\n\n"
-        f"نام: {name}\n"
-        f"شناسه: {user_id}\n"
-        f"📅 روزهای باقی‌مانده: {days_left}\n"
-        f"نوع اشتراک: رایگان (۷ روزه)"
-    )
+        expiry_str = get_user_expiry(user_id)
+        if expiry_str:
+            expiry_dt = datetime.fromisoformat(expiry_str)
+            days_left = (expiry_dt - datetime.now()).days
+            if days_left < 0:
+                days_left = 0
+        else:
+            days_left = 0
+        name = get_owner_name(user_id)
+        text = (
+            f"👤 **پنل کاربری**\n\n"
+            f"نام: {name}\n"
+            f"شناسه: {user_id}\n"
+            f"📅 روزهای باقی‌مانده: {days_left}\n"
+            f"نوع اشتراک: رایگان (۷ روزه)"
+        )
     bot.send_message(user_id, text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "ℹ️ راهنما")
@@ -471,7 +520,7 @@ def callback_back_main(call):
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
 
-# ---------- هندلر پیام‌های متنی (جستجوی دستی) ----------
+# ---------- هندلر پیام‌های متنی ----------
 @bot.message_handler(func=lambda msg: True)
 def handle_text_messages(message):
     user_id = message.chat.id
