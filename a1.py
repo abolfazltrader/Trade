@@ -20,12 +20,6 @@ BASE_URL = "https://trade-i4js.onrender.com"
 
 ADMIN_IDS = [6542890217]
 
-# کلیدهای API (اختیاری - از محیط متغیر بخوانید)
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
-TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
-OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
-OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
-
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -83,25 +77,17 @@ def get_owner_name(user_id):
     except:
         return "کاربر"
 
-# ========== سیستم دریافت قیمت (چندمنبعی با کش و تلاش مجدد) ==========
+# ========== سیستم دریافت قیمت (چندمنبعی با کش) ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
         self.cache_time = 60
-        self.executor = ThreadPoolExecutor(max_workers=6)
+        self.executor = ThreadPoolExecutor(max_workers=5)
         self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
         self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 8000})
         self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
         self.kucoin = ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000})
         self.coingecko_session = requests.Session()
-        self.oanda = None
-        if OANDA_API_KEY and OANDA_ACCOUNT_ID:
-            self.oanda = ccxt.oanda({
-                'apiKey': OANDA_API_KEY,
-                'accountId': OANDA_ACCOUNT_ID,
-                'enableRateLimit': True,
-                'timeout': 8000
-            })
         self.retry_count = 2
 
     def _get_cached(self, key):
@@ -114,18 +100,17 @@ class PriceFetcher:
     def _set_cache(self, key, data):
         self.cache[key] = (data, datetime.now())
 
-    def _fetch_with_retry(self, fetch_func, *args, retries=2):
+    def _fetch_with_retry(self, fetch_func, symbol, retries=2):
         for attempt in range(retries):
             try:
-                result = fetch_func(*args)
+                result = fetch_func(symbol)
                 if result and result.get('price') is not None:
                     return result
             except Exception as e:
-                logger.warning(f"Attempt {attempt+1} failed: {e}")
+                logger.warning(f"Attempt {attempt+1} failed for {symbol}: {e}")
                 time.sleep(0.5)
         return None
 
-    # ----- منابع کریپتو (قبلی) -----
     def _fetch_binance(self, symbol):
         try:
             ticker = self.binance.fetch_ticker(symbol)
@@ -183,94 +168,8 @@ class PriceFetcher:
             pass
         return None
 
-    # ----- منابع جدید برای فارکس و طلا -----
-    def _fetch_alpha_vantage_forex(self, from_currency, to_currency):
-        """دریافت قیمت فارکس از Alpha Vantage"""
-        try:
-            url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_currency}&to_currency={to_currency}&apikey={ALPHA_VANTAGE_KEY}"
-            resp = requests.get(url, timeout=5)
-            data = resp.json()
-            if "Realtime Currency Exchange Rate" in data:
-                rate = data["Realtime Currency Exchange Rate"].get("5. Exchange Rate")
-                change = data["Realtime Currency Exchange Rate"].get("9. Change in Percent")
-                if rate:
-                    return {'price': float(rate), 'change': float(change.replace('%', '')) if change else 0,
-                            'high': None, 'low': None, 'source': 'Alpha Vantage'}
-        except Exception:
-            pass
-        return None
-
-    def _fetch_twelve_data_forex(self, from_currency, to_currency):
-        """دریافت قیمت فارکس از Twelve Data"""
-        try:
-            if not TWELVE_DATA_KEY:
-                return None
-            url = f"https://api.twelvedata.com/price?symbol={from_currency}/{to_currency}&apikey={TWELVE_DATA_KEY}"
-            resp = requests.get(url, timeout=5)
-            data = resp.json()
-            if "price" in data:
-                return {'price': float(data['price']), 'change': 0,
-                        'high': None, 'low': None, 'source': 'Twelve Data'}
-        except Exception:
-            pass
-        return None
-
-    def _fetch_oanda_forex(self, from_currency, to_currency):
-        """دریافت قیمت فارکس از OANDA (نیاز به کلید)"""
-        try:
-            if not self.oanda:
-                return None
-            symbol = f"{from_currency}_{to_currency}"
-            ticker = self.oanda.fetch_ticker(symbol)
-            if ticker and ticker.get('last') is not None:
-                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
-                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'OANDA'}
-        except Exception:
-            pass
-        return None
-
-    def _fetch_frankfurter_forex(self, from_currency, to_currency):
-        """Frankfurter به عنوان fallback"""
-        try:
-            url = f"https://api.frankfurter.app/latest?from={from_currency}&to={to_currency}"
-            resp = requests.get(url, timeout=4)
-            data = resp.json()
-            if "rates" in data and to_currency in data["rates"]:
-                return {'price': data["rates"][to_currency], 'change': 0,
-                        'high': None, 'low': None, 'source': 'Frankfurter'}
-        except Exception:
-            pass
-        return None
-
-    def get_forex_price(self, from_currency, to_currency):
-        """دریافت قیمت فارکس از چند منبع معتبر"""
-        cache_key = f"forex_{from_currency}_{to_currency}"
-        cached = self._get_cached(cache_key)
-        if cached:
-            return cached
-
-        # منابع به ترتیب اولویت
-        sources = [
-            lambda: self._fetch_alpha_vantage_forex(from_currency, to_currency),
-            lambda: self._fetch_oanda_forex(from_currency, to_currency),
-            lambda: self._fetch_twelve_data_forex(from_currency, to_currency),
-            lambda: self._fetch_frankfurter_forex(from_currency, to_currency),
-        ]
-
-        futures = [self.executor.submit(src) for src in sources]
-        start_time = time.time()
-        for future in as_completed(futures, timeout=4):
-            result = future.result()
-            if result and result.get('price') is not None:
-                self._set_cache(cache_key, result)
-                return result
-            if time.time() - start_time > 4:
-                break
-
-        return None
-
     def get_crypto_price(self, symbol="BTC/USDT"):
-        """دریافت قیمت کریپتو (با منابع قبلی)"""
+        """دریافت قیمت از چند منبع (بدون نیاز به کلید)"""
         cache_key = f"crypto_{symbol}"
         cached = self._get_cached(cache_key)
         if cached:
@@ -302,14 +201,8 @@ fetcher = PriceFetcher()
 def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
-def get_forex_price(pair="EURUSD"):
-    """دریافت قیمت فارکس با فرمت EURUSD"""
-    from_currency = pair[:3]
-    to_currency = pair[3:]
-    return fetcher.get_forex_price(from_currency, to_currency)
-
 def get_usd_irt():
-    """دلار/تومان با کش و چند منبع (همان قبلی)"""
+    """دلار/تومان با چند منبع (بدون کلید)"""
     cache_key = "usd_irt"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -500,6 +393,15 @@ def analyze_step(message):
     if not symbol:
         bot.send_message(user_id, "❌ نام ارز معتبر وارد کنید.")
         return
+    
+    # تبدیل خودکار برای فارکس به جفت‌ارزهای USDT در بایننس
+    if symbol == "EURUSD":
+        symbol = "EUR/USDT"
+    elif symbol == "GBPUSD":
+        symbol = "GBP/USDT"
+    elif symbol == "XAUUSD":
+        symbol = "XAU/USDT"
+    
     if "/" in symbol:
         info = get_crypto_price(symbol)
         if info:
@@ -511,10 +413,16 @@ def analyze_step(message):
             text = "❌ ارز مورد نظر یافت نشد."
     else:
         if len(symbol) == 6:
-            pair = symbol
-            price = get_forex_price(pair)
-            if price:
-                text = f"📊 **تحلیل {pair[:3]}/{pair[3:]}**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
+            # تلاش برای فارکس از طریق بایننس
+            pair = f"{symbol[:3]}/{symbol[3:]}"
+            if pair in ["EUR/USD", "GBP/USD"]:
+                pair = pair.replace("/USD", "/USDT")
+            info = get_crypto_price(pair)
+            if info:
+                text = f"📊 **تحلیل {pair}**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر: {info['change']:.2f}%\n"
+                if info.get('high') and info.get('low'):
+                    text += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}"
+                text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
             else:
                 text = "❌ جفت‌ارز یافت نشد."
         else:
@@ -569,7 +477,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت (با منابع جدید) ----------
+# ---------- هندلرهای کالبک قیمت (با استفاده از بایننس) ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -608,24 +516,35 @@ def callback_price(call):
             reply = "❌ خطا در دریافت قیمت دلار/تومان."
 
     elif data == "price_eurusd":
-        price = get_forex_price("EURUSD")
-        if price:
-            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
+        # دریافت از بایننس با جفت‌ارز EUR/USDT
+        info = get_crypto_price("EUR/USDT")
+        if info:
+            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت یورو/دلار."
 
     elif data == "price_gbpusd":
-        price = get_forex_price("GBPUSD")
-        if price:
-            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
+        # دریافت از بایننس با جفت‌ارز GBP/USDT
+        info = get_crypto_price("GBP/USDT")
+        if info:
+            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت پوند/دلار."
 
     elif data == "price_gold":
-        # طلا به عنوان XAU/USD با استفاده از منابع فارکس
-        price = get_forex_price("XAUUSD")
-        if price:
-            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {price['price']:,.2f} $\n📌 منبع: {price.get('source', 'نامشخص')}"
+        # دریافت از بایننس با جفت‌ارز XAU/USDT (طلا)
+        info = get_crypto_price("XAU/USDT")
+        if info:
+            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت طلا."
 
