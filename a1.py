@@ -20,6 +20,12 @@ BASE_URL = "https://trade-i4js.onrender.com"
 
 ADMIN_IDS = [6542890217]
 
+# کلیدهای API (اختیاری - از محیط متغیر بخوانید)
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
+TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
+OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
+
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -77,17 +83,26 @@ def get_owner_name(user_id):
     except:
         return "کاربر"
 
-# ========== سیستم قدرتمند دریافت قیمت (چندمنبعی با کش و تلاش مجدد) ==========
+# ========== سیستم دریافت قیمت (چندمنبعی با کش و تلاش مجدد) ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
-        self.cache_time = 60  # افزایش کش به ۶۰ ثانیه
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 10000})
-        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 10000})
-        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
+        self.cache_time = 60
+        self.executor = ThreadPoolExecutor(max_workers=6)
+        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
+        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 8000})
+        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
+        self.kucoin = ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000})
         self.coingecko_session = requests.Session()
-        self.retry_count = 2  # تعداد تلاش مجدد برای هر منبع
+        self.oanda = None
+        if OANDA_API_KEY and OANDA_ACCOUNT_ID:
+            self.oanda = ccxt.oanda({
+                'apiKey': OANDA_API_KEY,
+                'accountId': OANDA_ACCOUNT_ID,
+                'enableRateLimit': True,
+                'timeout': 8000
+            })
+        self.retry_count = 2
 
     def _get_cached(self, key):
         if key in self.cache:
@@ -99,29 +114,24 @@ class PriceFetcher:
     def _set_cache(self, key, data):
         self.cache[key] = (data, datetime.now())
 
-    def _fetch_with_retry(self, fetch_func, symbol, retries=2):
-        """تلاش مجدد برای دریافت داده از یک منبع"""
+    def _fetch_with_retry(self, fetch_func, *args, retries=2):
         for attempt in range(retries):
             try:
-                result = fetch_func(symbol)
+                result = fetch_func(*args)
                 if result and result.get('price') is not None:
                     return result
             except Exception as e:
-                logger.warning(f"Attempt {attempt+1} failed for {symbol}: {e}")
+                logger.warning(f"Attempt {attempt+1} failed: {e}")
                 time.sleep(0.5)
         return None
 
+    # ----- منابع کریپتو (قبلی) -----
     def _fetch_binance(self, symbol):
         try:
             ticker = self.binance.fetch_ticker(symbol)
             if ticker and ticker.get('last') is not None:
-                return {
-                    'price': ticker['last'],
-                    'change': ticker.get('percentage', 0),
-                    'high': ticker.get('high', 0),
-                    'low': ticker.get('low', 0),
-                    'source': 'Binance'
-                }
+                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
+                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'Binance'}
         except Exception:
             pass
         return None
@@ -134,13 +144,8 @@ class PriceFetcher:
                 kraken_symbol = symbol.replace('/USDT', '/USD')
             ticker = self.kraken.fetch_ticker(kraken_symbol)
             if ticker and ticker.get('last') is not None:
-                return {
-                    'price': ticker['last'],
-                    'change': ticker.get('percentage', 0),
-                    'high': ticker.get('high', 0),
-                    'low': ticker.get('low', 0),
-                    'source': 'Kraken'
-                }
+                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
+                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'Kraken'}
         except Exception:
             pass
         return None
@@ -149,13 +154,18 @@ class PriceFetcher:
         try:
             ticker = self.okx.fetch_ticker(symbol)
             if ticker and ticker.get('last') is not None:
-                return {
-                    'price': ticker['last'],
-                    'change': ticker.get('percentage', 0),
-                    'high': ticker.get('high', 0),
-                    'low': ticker.get('low', 0),
-                    'source': 'OKX'
-                }
+                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
+                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'OKX'}
+        except Exception:
+            pass
+        return None
+
+    def _fetch_kucoin(self, symbol):
+        try:
+            ticker = self.kucoin.fetch_ticker(symbol)
+            if ticker and ticker.get('last') is not None:
+                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
+                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'KuCoin'}
         except Exception:
             pass
         return None
@@ -167,42 +177,105 @@ class PriceFetcher:
             resp = self.coingecko_session.get(url, timeout=5)
             data = resp.json()
             if coin_id in data and data[coin_id].get('usd') is not None:
-                return {
-                    'price': data[coin_id]['usd'],
-                    'change': data[coin_id].get('usd_24h_change', 0),
-                    'high': None,
-                    'low': None,
-                    'source': 'CoinGecko'
-                }
+                return {'price': data[coin_id]['usd'], 'change': data[coin_id].get('usd_24h_change', 0),
+                        'high': None, 'low': None, 'source': 'CoinGecko'}
         except Exception:
             pass
         return None
 
-    def _fetch_kucoin(self, symbol):
-        """منبع جایگزین: KuCoin"""
+    # ----- منابع جدید برای فارکس و طلا -----
+    def _fetch_alpha_vantage_forex(self, from_currency, to_currency):
+        """دریافت قیمت فارکس از Alpha Vantage"""
         try:
-            exchange = ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000})
-            ticker = exchange.fetch_ticker(symbol)
-            if ticker and ticker.get('last') is not None:
-                return {
-                    'price': ticker['last'],
-                    'change': ticker.get('percentage', 0),
-                    'high': ticker.get('high', 0),
-                    'low': ticker.get('low', 0),
-                    'source': 'KuCoin'
-                }
+            url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_currency}&to_currency={to_currency}&apikey={ALPHA_VANTAGE_KEY}"
+            resp = requests.get(url, timeout=5)
+            data = resp.json()
+            if "Realtime Currency Exchange Rate" in data:
+                rate = data["Realtime Currency Exchange Rate"].get("5. Exchange Rate")
+                change = data["Realtime Currency Exchange Rate"].get("9. Change in Percent")
+                if rate:
+                    return {'price': float(rate), 'change': float(change.replace('%', '')) if change else 0,
+                            'high': None, 'low': None, 'source': 'Alpha Vantage'}
         except Exception:
             pass
         return None
 
-    def get_price(self, symbol, force_refresh=False):
-        cache_key = f"price_{symbol}"
-        if not force_refresh:
-            cached = self._get_cached(cache_key)
-            if cached:
-                return cached
+    def _fetch_twelve_data_forex(self, from_currency, to_currency):
+        """دریافت قیمت فارکس از Twelve Data"""
+        try:
+            if not TWELVE_DATA_KEY:
+                return None
+            url = f"https://api.twelvedata.com/price?symbol={from_currency}/{to_currency}&apikey={TWELVE_DATA_KEY}"
+            resp = requests.get(url, timeout=5)
+            data = resp.json()
+            if "price" in data:
+                return {'price': float(data['price']), 'change': 0,
+                        'high': None, 'low': None, 'source': 'Twelve Data'}
+        except Exception:
+            pass
+        return None
 
-        # منابع با اولویت (Binance، KuCoin، OKX، Kraken، CoinGecko)
+    def _fetch_oanda_forex(self, from_currency, to_currency):
+        """دریافت قیمت فارکس از OANDA (نیاز به کلید)"""
+        try:
+            if not self.oanda:
+                return None
+            symbol = f"{from_currency}_{to_currency}"
+            ticker = self.oanda.fetch_ticker(symbol)
+            if ticker and ticker.get('last') is not None:
+                return {'price': ticker['last'], 'change': ticker.get('percentage', 0),
+                        'high': ticker.get('high', 0), 'low': ticker.get('low', 0), 'source': 'OANDA'}
+        except Exception:
+            pass
+        return None
+
+    def _fetch_frankfurter_forex(self, from_currency, to_currency):
+        """Frankfurter به عنوان fallback"""
+        try:
+            url = f"https://api.frankfurter.app/latest?from={from_currency}&to={to_currency}"
+            resp = requests.get(url, timeout=4)
+            data = resp.json()
+            if "rates" in data and to_currency in data["rates"]:
+                return {'price': data["rates"][to_currency], 'change': 0,
+                        'high': None, 'low': None, 'source': 'Frankfurter'}
+        except Exception:
+            pass
+        return None
+
+    def get_forex_price(self, from_currency, to_currency):
+        """دریافت قیمت فارکس از چند منبع معتبر"""
+        cache_key = f"forex_{from_currency}_{to_currency}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        # منابع به ترتیب اولویت
+        sources = [
+            lambda: self._fetch_alpha_vantage_forex(from_currency, to_currency),
+            lambda: self._fetch_oanda_forex(from_currency, to_currency),
+            lambda: self._fetch_twelve_data_forex(from_currency, to_currency),
+            lambda: self._fetch_frankfurter_forex(from_currency, to_currency),
+        ]
+
+        futures = [self.executor.submit(src) for src in sources]
+        start_time = time.time()
+        for future in as_completed(futures, timeout=4):
+            result = future.result()
+            if result and result.get('price') is not None:
+                self._set_cache(cache_key, result)
+                return result
+            if time.time() - start_time > 4:
+                break
+
+        return None
+
+    def get_crypto_price(self, symbol="BTC/USDT"):
+        """دریافت قیمت کریپتو (با منابع قبلی)"""
+        cache_key = f"crypto_{symbol}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
         sources = [
             self._fetch_binance,
             self._fetch_kucoin,
@@ -211,10 +284,7 @@ class PriceFetcher:
             self._fetch_coingecko
         ]
 
-        futures = []
-        for src in sources:
-            futures.append(self.executor.submit(self._fetch_with_retry, src, symbol, self.retry_count))
-
+        futures = [self.executor.submit(self._fetch_with_retry, src, symbol) for src in sources]
         start_time = time.time()
         for future in as_completed(futures, timeout=4):
             result = future.result()
@@ -228,42 +298,22 @@ class PriceFetcher:
 
 fetcher = PriceFetcher()
 
-# ---------- توابع دریافت قیمت (با مدیریت خطا و fallback) ----------
+# ---------- توابع عمومی دریافت قیمت ----------
 def get_crypto_price(symbol="BTC/USDT"):
-    return fetcher.get_price(symbol)
+    return fetcher.get_crypto_price(symbol)
 
 def get_forex_price(pair="EURUSD"):
-    """دریافت فارکس با fallback به exchangerate-api"""
-    # Frankfurter
-    try:
-        url = f"https://api.frankfurter.app/latest?from={pair[:3]}&to={pair[3:]}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if "rates" in data and pair[3:] in data["rates"]:
-            return data["rates"][pair[3:]]
-    except Exception:
-        pass
-
-    # Fallback به exchangerate-api
-    try:
-        url = f"https://api.exchangerate-api.com/v4/latest/{pair[:3]}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if "rates" in data and pair[3:] in data["rates"]:
-            return data["rates"][pair[3:]]
-    except Exception:
-        pass
-
-    return None
+    """دریافت قیمت فارکس با فرمت EURUSD"""
+    from_currency = pair[:3]
+    to_currency = pair[3:]
+    return fetcher.get_forex_price(from_currency, to_currency)
 
 def get_usd_irt():
-    """دریافت دلار/تومان با چند منبع"""
+    """دلار/تومان با کش و چند منبع (همان قبلی)"""
     cache_key = "usd_irt"
     cached = fetcher._get_cached(cache_key)
     if cached:
         return cached
-
-    # منبع اول: زرین‌پال
     try:
         url = "https://api.zarinpal.com/payment/unit-converter/v1/convert"
         params = {"amount": 1, "from_currency": "USD", "to_currency": "IRT"}
@@ -276,8 +326,6 @@ def get_usd_irt():
                 return price
     except Exception:
         pass
-
-    # منبع دوم: tgju.org (طلا و ارز)
     try:
         url = "https://api.tgju.org/v1/market/price/USD"
         resp = requests.get(url, timeout=5)
@@ -289,8 +337,6 @@ def get_usd_irt():
                 return price
     except Exception:
         pass
-
-    # منبع سوم: exir.ir
     try:
         url = "https://exir.ir/api/price/USD"
         resp = requests.get(url, timeout=5)
@@ -302,7 +348,6 @@ def get_usd_irt():
                 return price
     except Exception:
         pass
-
     return None
 
 def get_top_crypto(limit=20):
@@ -333,7 +378,7 @@ def get_crypto_price_by_symbol(symbol):
     try:
         if not symbol.endswith('/USDT'):
             symbol = f"{symbol.upper()}/USDT"
-        return fetcher.get_price(symbol)
+        return fetcher.get_crypto_price(symbol)
     except Exception:
         return None
 
@@ -469,7 +514,7 @@ def analyze_step(message):
             pair = symbol
             price = get_forex_price(pair)
             if price:
-                text = f"📊 **تحلیل {pair[:3]}/{pair[3:]}**\n💰 قیمت: {price:.4f}"
+                text = f"📊 **تحلیل {pair[:3]}/{pair[3:]}**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
             else:
                 text = "❌ جفت‌ارز یافت نشد."
         else:
@@ -524,7 +569,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت ----------
+# ---------- هندلرهای کالبک قیمت (با منابع جدید) ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -565,21 +610,22 @@ def callback_price(call):
     elif data == "price_eurusd":
         price = get_forex_price("EURUSD")
         if price:
-            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {price:.4f}\n📌 منبع: Frankfurter"
+            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت یورو/دلار."
 
     elif data == "price_gbpusd":
         price = get_forex_price("GBPUSD")
         if price:
-            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {price:.4f}\n📌 منبع: Frankfurter"
+            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {price['price']:.4f}\n📌 منبع: {price.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت پوند/دلار."
 
     elif data == "price_gold":
-        info = get_crypto_price("XAU/USD")
-        if info:
-            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
+        # طلا به عنوان XAU/USD با استفاده از منابع فارکس
+        price = get_forex_price("XAUUSD")
+        if price:
+            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {price['price']:,.2f} $\n📌 منبع: {price.get('source', 'نامشخص')}"
         else:
             reply = "❌ خطا در دریافت قیمت طلا."
 
