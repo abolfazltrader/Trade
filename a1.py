@@ -81,7 +81,7 @@ def get_owner_name(user_id):
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
-        self.cache_time = 15  # کش به مدت ۱۵ ثانیه
+        self.cache_time = 30  # افزایش کش به ۳۰ ثانیه برای سرعت بیشتر
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 6000})
         self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 6000})
@@ -172,10 +172,11 @@ class PriceFetcher:
             if cached:
                 return cached
 
+        # اولویت با سریع‌ترین منبع (Binance)
         sources = [
             self._fetch_binance,
-            self._fetch_kraken,
             self._fetch_okx,
+            self._fetch_kraken,
             self._fetch_coingecko
         ]
 
@@ -550,20 +551,44 @@ def callback_top_select(call):
         return
 
     symbol = call.data.split("top_select_")[1]
-    # تبدیل نماد به فرمت USDT
-    if not symbol.endswith('/USDT'):
-        symbol = f"{symbol}/USDT"
 
-    info = get_crypto_price(symbol)
+    # مدیریت ارزهای خاص
+    if symbol == "USDT" or symbol == "USDC":
+        reply = f"💰 **قیمت {symbol}**\nقیمت: 1.00 $\nتغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
+        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
+        bot.answer_callback_query(call.id)
+        return
+
+    if symbol == "STETH":
+        # stETH قیمت نزدیک به ETH دارد
+        pair = "ETH/USDT"
+        display_name = "stETH (معادل اتریوم)"
+        info = get_crypto_price(pair)
+        if info:
+            reply = f"💰 **قیمت {display_name}**\n"
+            reply += f"قیمت: {info['price']:,.2f} $\n"
+            reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        else:
+            reply = "❌ خطا در دریافت قیمت stETH."
+        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
+        bot.answer_callback_query(call.id)
+        return
+
+    # سایر ارزها به صورت معمول
+    pair = f"{symbol}/USDT"
+    info = get_crypto_price(pair)
     if info:
-        reply = f"💰 **قیمت {symbol.replace('/USDT', '')}**\n"
+        reply = f"💰 **قیمت {symbol}**\n"
         reply += f"قیمت: {info['price']:,.2f} $\n"
         reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
         if info.get('high') and info.get('low'):
             reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
         reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
     else:
-        reply = f"❌ خطا در دریافت قیمت {symbol.replace('/USDT', '')}."
+        reply = f"❌ خطا در دریافت قیمت {symbol}."
 
     bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
     bot.answer_callback_query(call.id)
@@ -593,17 +618,31 @@ def handle_text_messages(message):
             bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
             return
 
-        info = get_crypto_price_by_symbol(text)
-        if info:
-            reply = f"💰 **قیمت {text.upper()}**\n"
-            reply += f"قیمت: {info['price']:,.2f} $\n"
-            reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
-            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        symbol = text.upper()
+
+        # مدیریت استیبل‌کوین‌ها و stETH
+        if symbol == "USDT" or symbol == "USDC":
+            reply = f"💰 **قیمت {symbol}**\nقیمت: 1.00 $\nتغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
             bot.send_message(user_id, reply, parse_mode='Markdown')
+        elif symbol == "STETH":
+            info = get_crypto_price("ETH/USDT")
+            if info:
+                reply = f"💰 **قیمت stETH (معادل اتریوم)**\nقیمت: {info['price']:,.2f} $\nتغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
+                bot.send_message(user_id, reply, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, "❌ خطا در دریافت قیمت stETH.")
         else:
-            bot.send_message(user_id, f"❌ نماد `{text}` یافت نشد. لطفاً از نمادهای معتبر استفاده کنید.", parse_mode='Markdown')
+            info = get_crypto_price_by_symbol(text)
+            if info:
+                reply = f"💰 **قیمت {text.upper()}**\n"
+                reply += f"قیمت: {info['price']:,.2f} $\n"
+                reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
+                if info.get('high') and info.get('low'):
+                    reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
+                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+                bot.send_message(user_id, reply, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, f"❌ نماد `{text}` یافت نشد. لطفاً از نمادهای معتبر استفاده کنید.", parse_mode='Markdown')
         bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
         return
 
