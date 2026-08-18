@@ -202,7 +202,7 @@ def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
 def get_usd_irt():
-    """دلار/تومان با چند منبع (بدون کلید)"""
+    """دلار/تومان با چند منبع (بدون کلید) - برای بخش تحلیل ارز دلخواه نگه داشته می‌شود"""
     cache_key = "usd_irt"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -291,12 +291,12 @@ def main_menu_keyboard():
 def price_menu_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("₿ بیت‌کوین", callback_data="price_btc"),
-        InlineKeyboardButton("⟠ اتریوم", callback_data="price_eth"),
-        InlineKeyboardButton("💵 دلار/تومان", callback_data="price_usdirt"),
-        InlineKeyboardButton("🇪🇺 یورو/دلار", callback_data="price_eurusd"),
-        InlineKeyboardButton("🥇 طلا (XAU/USD)", callback_data="price_gold"),
-        InlineKeyboardButton("🇬🇧 پوند/دلار", callback_data="price_gbpusd")
+        InlineKeyboardButton("₿ BTC", callback_data="price_btc"),
+        InlineKeyboardButton("⟠ ETH", callback_data="price_eth"),
+        InlineKeyboardButton("💵 USDT", callback_data="price_usdt"),
+        InlineKeyboardButton("🇪🇺 EUR/USD", callback_data="price_eurusd"),
+        InlineKeyboardButton("🥇 XAU/USD", callback_data="price_gold"),
+        InlineKeyboardButton("🇬🇧 GBP/USD", callback_data="price_gbpusd")
     )
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
@@ -442,7 +442,7 @@ def handle_suggest(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    suggest_text = "🎯 **پیشنهاد خرید**\n\nبر اساس تحلیل‌های فعلی، ارزهای زیر پتانسیل رشد دارند:\n• بیت‌کوین (BTC)\n• اتریوم (ETH)\n• طلا (XAU)"
+    suggest_text = "🎯 **پیشنهاد خرید**\n\nبر اساس تحلیل‌های فعلی، ارزهای زیر پتانسیل رشد دارند:\n• BTC\n• ETH\n• XAU"
     bot.send_message(user_id, suggest_text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "👤 پنل کاربری")
@@ -477,7 +477,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت (با استفاده از بایننس) ----------
+# ---------- هندلرهای کالبک قیمت (با دکمه‌های جدید) ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -491,62 +491,56 @@ def callback_price(call):
     if data == "price_btc":
         info = get_crypto_price("BTC/USDT")
         if info:
-            reply = f"₿ **بیت‌کوین (BTC/USDT)**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply = f"₿ **BTC/USDT**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 reply += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}\n"
             reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
-            reply = "❌ خطا در دریافت قیمت بیت‌کوین."
+            reply = "❌ خطا در دریافت قیمت BTC."
 
     elif data == "price_eth":
         info = get_crypto_price("ETH/USDT")
         if info:
-            reply = f"⟠ **اتریوم (ETH/USDT)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply = f"⟠ **ETH/USDT**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
             reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
-            reply = "❌ خطا در دریافت قیمت اتریوم."
+            reply = "❌ خطا در دریافت قیمت ETH."
 
-    elif data == "price_usdirt":
-        price = get_usd_irt()
-        if price:
-            reply = f"💵 **دلار/تومان (USD/IRT)**\n💰 قیمت: {price:,.0f} تومان\n📌 منبع: شبکه"
-        else:
-            reply = "❌ خطا در دریافت قیمت دلار/تومان."
+    elif data == "price_usdt":
+        # قیمت USDT همیشه ۱ دلار است
+        reply = f"💵 **USDT/USD**\n💰 قیمت: 1.00 $\n📊 تغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
 
     elif data == "price_eurusd":
-        # دریافت از بایننس با جفت‌ارز EUR/USDT
         info = get_crypto_price("EUR/USDT")
         if info:
-            reply = f"🇪🇺 **یورو/دلار (EUR/USD)**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
             reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
-            reply = "❌ خطا در دریافت قیمت یورو/دلار."
+            reply = "❌ خطا در دریافت قیمت EUR/USD."
 
     elif data == "price_gbpusd":
-        # دریافت از بایننس با جفت‌ارز GBP/USDT
         info = get_crypto_price("GBP/USDT")
         if info:
-            reply = f"🇬🇧 **پوند/دلار (GBP/USD)**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
             reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
-            reply = "❌ خطا در دریافت قیمت پوند/دلار."
+            reply = "❌ خطا در دریافت قیمت GBP/USD."
 
     elif data == "price_gold":
-        # دریافت از بایننس با جفت‌ارز XAU/USDT (طلا)
         info = get_crypto_price("XAU/USDT")
         if info:
-            reply = f"🥇 **طلا (XAU/USD)**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
             if info.get('high') and info.get('low'):
                 reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
             reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
-            reply = "❌ خطا در دریافت قیمت طلا."
+            reply = "❌ خطا در دریافت قیمت XAU/USD."
 
     bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
     bot.answer_callback_query(call.id)
