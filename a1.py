@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------- تنظیمات اولیه ----------
@@ -83,13 +82,13 @@ class PriceFetcher:
     def __init__(self):
         self.cache = {}
         self.cache_time = 15  # کش به مدت ۱۵ ثانیه
-        self.executor = ThreadPoolExecutor(max_workers=3)
-        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
-        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 8000})
-        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 6000})
+        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 6000})
+        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 6000})
+        self.coingecko_session = requests.Session()
 
     def _get_cached(self, key):
-        """دریافت از کش اگر معتبر باشد"""
         if key in self.cache:
             data, timestamp = self.cache[key]
             if (datetime.now() - timestamp).seconds < self.cache_time:
@@ -97,7 +96,6 @@ class PriceFetcher:
         return None
 
     def _set_cache(self, key, data):
-        """ذخیره در کش"""
         self.cache[key] = (data, datetime.now())
 
     def _fetch_binance(self, symbol):
@@ -111,17 +109,16 @@ class PriceFetcher:
                     'low': ticker.get('low', 0),
                     'source': 'Binance'
                 }
-        except Exception as e:
-            logger.warning(f"Binance error: {e}")
+        except Exception:
+            pass
         return None
 
     def _fetch_kraken(self, symbol):
         try:
-            # تبدیل نماد به فرمت Kraken (مثلاً BTC/USDT → XBT/USD)
             if symbol == "BTC/USDT":
                 kraken_symbol = "XBT/USD"
             else:
-                kraken_symbol = symbol
+                kraken_symbol = symbol.replace('/USDT', '/USD')
             ticker = self.kraken.fetch_ticker(kraken_symbol)
             if ticker and ticker.get('last') is not None:
                 return {
@@ -131,8 +128,8 @@ class PriceFetcher:
                     'low': ticker.get('low', 0),
                     'source': 'Kraken'
                 }
-        except Exception as e:
-            logger.warning(f"Kraken error: {e}")
+        except Exception:
+            pass
         return None
 
     def _fetch_okx(self, symbol):
@@ -146,15 +143,15 @@ class PriceFetcher:
                     'low': ticker.get('low', 0),
                     'source': 'OKX'
                 }
-        except Exception as e:
-            logger.warning(f"OKX error: {e}")
+        except Exception:
+            pass
         return None
 
     def _fetch_coingecko(self, symbol):
         try:
             coin_id = symbol.split('/')[0].lower()
             url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-            resp = requests.get(url, timeout=5)
+            resp = self.coingecko_session.get(url, timeout=4)
             data = resp.json()
             if coin_id in data and data[coin_id].get('usd') is not None:
                 return {
@@ -164,19 +161,17 @@ class PriceFetcher:
                     'low': None,
                     'source': 'CoinGecko'
                 }
-        except Exception as e:
-            logger.warning(f"CoinGecko error: {e}")
+        except Exception:
+            pass
         return None
 
     def get_price(self, symbol, force_refresh=False):
-        """دریافت قیمت از چند منبع به صورت موازی و سریع"""
         cache_key = f"price_{symbol}"
         if not force_refresh:
             cached = self._get_cached(cache_key)
             if cached:
                 return cached
 
-        # دریافت از همه منابع به صورت موازی
         sources = [
             self._fetch_binance,
             self._fetch_kraken,
@@ -184,11 +179,7 @@ class PriceFetcher:
             self._fetch_coingecko
         ]
 
-        futures = []
-        for src in sources:
-            futures.append(self.executor.submit(src, symbol))
-
-        # اولین پاسخ معتبر را برمی‌گردانیم (با timeout کلی ۳ ثانیه)
+        futures = [self.executor.submit(src, symbol) for src in sources]
         start_time = time.time()
         for future in as_completed(futures, timeout=3):
             result = future.result()
@@ -200,28 +191,24 @@ class PriceFetcher:
 
         return None
 
-# ========== نمونه‌ی اصلی PriceFetcher ==========
 fetcher = PriceFetcher()
 
-# ---------- توابع دریافت قیمت (با استفاده از PriceFetcher) ----------
+# ---------- توابع دریافت قیمت ----------
 def get_crypto_price(symbol="BTC/USDT"):
-    """دریافت قیمت با سیستم چندمنبعی"""
     return fetcher.get_price(symbol)
 
 def get_forex_price(pair="EURUSD"):
-    """دریافت فارکس (همان Frankfurter)"""
     try:
         url = f"https://api.frankfurter.app/latest?from={pair[:3]}&to={pair[3:]}"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=4)
         data = resp.json()
         if "rates" in data and pair[3:] in data["rates"]:
             return data["rates"][pair[3:]]
-    except Exception as e:
-        logger.error(f"Forex error: {e}")
+    except Exception:
+        pass
     return None
 
 def get_usd_irt():
-    """دریافت دلار/تومان (با کش ۳۰ ثانیه)"""
     cache_key = "usd_irt"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -229,18 +216,17 @@ def get_usd_irt():
     try:
         url = "https://api.zarinpal.com/payment/unit-converter/v1/convert"
         params = {"amount": 1, "from_currency": "USD", "to_currency": "IRT"}
-        resp = requests.get(url, params=params, timeout=5)
+        resp = requests.get(url, params=params, timeout=4)
         data = resp.json()
         if data.get("result") and "data" in data["result"]:
             price = data["result"]["data"]["amount"]
             fetcher._set_cache(cache_key, price)
             return price
-    except Exception as e:
-        logger.error(f"USD/IRT error: {e}")
+    except Exception:
+        pass
     return None
 
 def get_top_crypto(limit=20):
-    """دریافت ۲۰ ارز برتر از CoinGecko با کش ۵ دقیقه‌ای"""
     cache_key = "top20"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -248,7 +234,7 @@ def get_top_crypto(limit=20):
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1, "sparkline": "false"}
-        resp = requests.get(url, params=params, timeout=8)
+        resp = requests.get(url, params=params, timeout=6)
         data = resp.json()
         if not isinstance(data, list):
             return None
@@ -261,21 +247,18 @@ def get_top_crypto(limit=20):
             })
         fetcher._set_cache(cache_key, result)
         return result
-    except Exception as e:
-        logger.error(f"Top crypto error: {e}")
+    except Exception:
         return None
 
 def get_crypto_price_by_symbol(symbol):
-    """دریافت قیمت با نماد دلخواه (با کش)"""
     try:
         if not symbol.endswith('/USDT'):
             symbol = f"{symbol.upper()}/USDT"
         return fetcher.get_price(symbol)
-    except Exception as e:
-        logger.error(f"Symbol price error: {e}")
+    except Exception:
         return None
 
-# ---------- دکمه‌های منو (بدون تغییر) ----------
+# ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_price = KeyboardButton("📊 قیمت لحظه‌ای")
@@ -299,8 +282,7 @@ def price_menu_keyboard():
         InlineKeyboardButton("🇬🇧 پوند/دلار", callback_data="price_gbpusd")
     )
     keyboard.add(
-        InlineKeyboardButton("📋 ۲۰ ارز برتر", callback_data="price_top20"),
-        InlineKeyboardButton("🔍 جستجوی دستی", callback_data="price_search")
+        InlineKeyboardButton("🔍 جستجوی دستی و لیست برترین‌ها", callback_data="price_search")
     )
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
@@ -310,7 +292,22 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
-# ---------- دستور /start (بدون تغییر) ----------
+# ========== منوی انتخاب از ۲۰ ارز برتر ==========
+def top20_menu_keyboard():
+    top_list = get_top_crypto(20)
+    if not top_list:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("❌ خطا در دریافت لیست", callback_data="back_main"))
+        return keyboard
+
+    keyboard = InlineKeyboardMarkup(row_width=3)
+    for item in top_list:
+        symbol = item['symbol']
+        keyboard.add(InlineKeyboardButton(symbol, callback_data=f"top_select_{symbol}"))
+    keyboard.add(InlineKeyboardButton("🔙 بازگشت به منوی قیمت", callback_data="back_to_price"))
+    return keyboard
+
+# ---------- دستور /start ----------
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -466,7 +463,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت (با نمایش منبع) ----------
+# ---------- هندلرهای کالبک قیمت ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -525,23 +522,18 @@ def callback_price(call):
         else:
             reply = "❌ خطا در دریافت قیمت طلا."
 
-    elif data == "price_top20":
-        top_list = get_top_crypto(20)
-        if top_list:
-            text = "📋 **۲۰ ارز برتر کریپتو (بر اساس مارکت‌کپ):**\n\n"
-            for idx, item in enumerate(top_list, 1):
-                change_emoji = "🟢" if item['change'] and item['change'] >= 0 else "🔴"
-                text += f"{idx}. {item['symbol']}: ${item['price']:,.2f} {change_emoji} {item['change']:.2f}%\n"
-            reply = text
-        else:
-            reply = "❌ خطا در دریافت لیست ارزهای برتر."
-
-        bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
-        bot.answer_callback_query(call.id)
-        return
-
     elif data == "price_search":
-        bot.edit_message_text("🔍 **جستجوی قیمت ارز**\n\nلطفاً نام نماد ارز مورد نظر را تایپ کنید (مثلاً `ADA` یا `BTC`).", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        # نمایش منوی ۲۰ ارز برتر + امکان جستجوی دستی
+        top_keyboard = top20_menu_keyboard()
+        bot.edit_message_text(
+            "🔍 **جستجوی دستی یا انتخاب از لیست برترین‌ها**\n\n"
+            "• روی یکی از دکمه‌های زیر کلیک کنید تا قیمت آن را ببینید.\n"
+            "• یا نام نماد مورد نظر (مثلاً `ADA` یا `BTC`) را تایپ کنید.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=top_keyboard,
+            parse_mode='Markdown'
+        )
         waiting_for_symbol[user_id] = True
         bot.answer_callback_query(call.id)
         return
@@ -549,13 +541,45 @@ def callback_price(call):
     bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
     bot.answer_callback_query(call.id)
 
+# ========== کالبک انتخاب ارز از لیست ۲۰ تایی ==========
+@bot.callback_query_handler(func=lambda call: call.data.startswith("top_select_"))
+def callback_top_select(call):
+    user_id = call.from_user.id
+    if is_user_expired(user_id):
+        bot.answer_callback_query(call.id, "⏰ دوره آزمایشی شما به پایان رسیده.", show_alert=True)
+        return
+
+    symbol = call.data.split("top_select_")[1]
+    # تبدیل نماد به فرمت USDT
+    if not symbol.endswith('/USDT'):
+        symbol = f"{symbol}/USDT"
+
+    info = get_crypto_price(symbol)
+    if info:
+        reply = f"💰 **قیمت {symbol.replace('/USDT', '')}**\n"
+        reply += f"قیمت: {info['price']:,.2f} $\n"
+        reply += f"تغییر ۲۴h: {info['change']:.2f}%\n"
+        if info.get('high') and info.get('low'):
+            reply += f"بالاترین: {info['high']:,.2f}\nپایین‌ترین: {info['low']:,.2f}\n"
+        reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+    else:
+        reply = f"❌ خطا در دریافت قیمت {symbol.replace('/USDT', '')}."
+
+    bot.edit_message_text(reply, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_price")
+def callback_back_to_price(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text("📊 لطفاً یک گزینه را انتخاب کنید:", call.message.chat.id, call.message.message_id, reply_markup=price_menu_keyboard())
+
 @bot.callback_query_handler(func=lambda call: call.data == "back_main")
 def callback_back_main(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
 
-# ---------- هندلر پیام‌های متنی ----------
+# ---------- هندلر پیام‌های متنی (جستجوی دستی) ----------
 @bot.message_handler(func=lambda msg: True)
 def handle_text_messages(message):
     user_id = message.chat.id
@@ -563,6 +587,12 @@ def handle_text_messages(message):
 
     if waiting_for_symbol.get(user_id, False):
         waiting_for_symbol[user_id] = False
+        # اگر کاربر عدد یا کاراکتر خاص وارد کرده، پیام راهنما
+        if not text.isalpha() and '/' not in text:
+            bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید (مثلاً `ADA` یا `BTC`).", parse_mode='Markdown')
+            bot.send_message(user_id, "🔙 برای ادامه جستجو یا بازگشت، از دکمه‌های منوی قیمت استفاده کنید:", reply_markup=price_menu_keyboard())
+            return
+
         info = get_crypto_price_by_symbol(text)
         if info:
             reply = f"💰 **قیمت {text.upper()}**\n"
