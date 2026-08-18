@@ -4,6 +4,7 @@ import requests
 import ccxt
 import sqlite3
 import time
+import feedparser
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
@@ -275,6 +276,35 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
+# ========== تابع دریافت اخبار (با استفاده از RSS) ==========
+def get_news(limit=5):
+    """دریافت اخبار اقتصادی و مالی از RSS گوگل نیوز"""
+    try:
+        # RSS گوگل نیوز برای موضوعات اقتصادی (انگلیسی)
+        rss_url = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(rss_url)
+        
+        news_list = []
+        for entry in feed.entries[:limit]:
+            # استخراج عنوان و خلاصه
+            title = entry.title
+            summary = entry.summary if hasattr(entry, 'summary') else ""
+            # حذف تگ‌های HTML از خلاصه
+            if summary:
+                import re
+                summary = re.sub(r'<[^>]+>', '', summary)
+                summary = summary[:150] + "..." if len(summary) > 150 else summary
+            link = entry.link
+            news_list.append({
+                'title': title,
+                'summary': summary,
+                'link': link
+            })
+        return news_list
+    except Exception as e:
+        logger.error(f"Error fetching news: {e}")
+        return None
+
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -368,7 +398,29 @@ def handle_news(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    bot.send_message(user_id, "📰 **اخبار امروز و هفته**\n\n(به‌زودی با API خبری تکمیل می‌شود.)", parse_mode='Markdown')
+    
+    # ارسال پیام "در حال دریافت..." برای نشان دادن فعالیت
+    processing_msg = bot.send_message(user_id, "⏳ در حال دریافت آخرین اخبار... لطفاً صبر کنید.")
+    
+    news_list = get_news(limit=5)
+    if not news_list:
+        bot.edit_message_text("❌ خطا در دریافت اخبار. لحظاتی دیگر تلاش کنید.", user_id, processing_msg.message_id)
+        return
+    
+    # ساخت پیام خبری
+    news_text = "📰 **اخبار امروز و هفته (اقتصادی و مالی)**\n\n"
+    for i, item in enumerate(news_list, 1):
+        news_text += f"**{i}. {item['title']}**\n"
+        if item['summary']:
+            news_text += f"📌 {item['summary']}\n"
+        news_text += f"🔗 [مشاهده کامل خبر]({item['link']})\n\n"
+    
+    # اگر طول پیام بیش از حد مجاز بود، آن را تقسیم کن
+    if len(news_text) > 4096:
+        news_text = news_text[:4000] + "\n\n... (اخبار بیشتر در لینک‌ها)"
+    
+    # ویرایش پیام "در حال دریافت" به پیام نهایی
+    bot.edit_message_text(news_text, user_id, processing_msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
 
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
@@ -468,7 +520,7 @@ def handle_help(message):
     help_text = (
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
-        "📰 اخبار: اخبار روز و هفته (به‌زودی)\n"
+        "📰 اخبار: اخبار امروز و هفته (اقتصادی و مالی)\n"
         "📈 سیگنال: سیگنال‌های خرید و فروش (به‌زودی)\n"
         "🔍 تحلیل: تحلیل تکنیکال و بنیادی ارز دلخواه\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
@@ -477,7 +529,7 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ---------- هندلرهای کالبک قیمت (با دکمه‌های جدید) ----------
+# ---------- هندلرهای کالبک قیمت ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
@@ -509,7 +561,6 @@ def callback_price(call):
             reply = "❌ خطا در دریافت قیمت ETH."
 
     elif data == "price_usdt":
-        # قیمت USDT همیشه ۱ دلار است
         reply = f"💵 **USDT/USD**\n💰 قیمت: 1.00 $\n📊 تغییر ۲۴h: 0.00%\n📌 منبع: ثابت (استیبل‌کوین)"
 
     elif data == "price_eurusd":
