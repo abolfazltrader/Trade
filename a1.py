@@ -4,8 +4,6 @@ import requests
 import ccxt
 import sqlite3
 import time
-import re
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
@@ -30,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 waiting_for_symbol = {}
 
-# ========== لیست نمادهای معتبر برای اخبار ==========
+# ========== لیست نمادهای معتبر برای اخبار (همان‌های قبل) ==========
 VALID_CRYPTO_SYMBOLS = {
     "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
     "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
@@ -284,48 +282,135 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار اختصاصی هر ارز (با XML Parser) ==========
-def get_crypto_news(symbol, limit=5):
+# ========== تابع دریافت اخبار از CryptoPanic (رایگان، بدون کلید) ==========
+def get_crypto_news(symbol, limit=10):
     """
-    دریافت اخبار مربوط به یک ارز با استفاده از RSS گوگل نیوز (انگلیسی)
-    و parse با xml.etree.ElementTree
+    دریافت اخبار اختصاصی یک ارز از CryptoPanic
+    این API کاملاً رایگان است و نیازی به کلید ندارد
     """
     try:
+        # تبدیل نماد به فرمت مناسب برای CryptoPanic
+        # برای ارزهایی مثل ETH, BTC از کدهای استاندارد استفاده می‌شود
+        url = "https://cryptopanic.com/api/v1/posts/"
+        params = {
+            'auth_token': '',  # خالی بگذارید (رایگان)
+            'currencies': symbol.lower(),
+            'kind': 'news',
+            'public': 'true',
+            'filter': 'hot'  # داغ‌ترین اخبار
+        }
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        if not data.get('results'):
+            # اگر خبری نبود، از گوگل نیوز به عنوان fallback استفاده کن
+            return get_news_from_google(symbol)
+        
+        # طبقه‌بندی اخبار به مثبت و منفی بر اساس برچسب‌ها
+        positive_news = []
+        negative_news = []
+        
+        for post in data['results'][:limit]:
+            title = post.get('title', 'بدون عنوان')
+            link = post.get('url', '#')
+            # بررسی برچسب‌های احساسات (در صورت وجود)
+            sentiment = 'neutral'
+            for tag in post.get('tags', []):
+                if tag.get('slug') in ['bullish', 'positive']:
+                    sentiment = 'positive'
+                    break
+                elif tag.get('slug') in ['bearish', 'negative']:
+                    sentiment = 'negative'
+                    break
+            
+            news_item = {
+                'title': title,
+                'link': link,
+                'sentiment': sentiment
+            }
+            
+            if sentiment == 'positive':
+                positive_news.append(news_item)
+            elif sentiment == 'negative':
+                negative_news.append(news_item)
+            else:
+                # اخبار خنثی را به عنوان مثبت یا منفی دسته‌بندی نمی‌کنیم
+                pass
+        
+        # تحلیل ساده بر اساس تعداد اخبار مثبت و منفی
+        positive_count = len(positive_news)
+        negative_count = len(negative_news)
+        
+        if positive_count > negative_count:
+            overall_sentiment = "🟢 **مثبت**"
+            trading_result = "✅ خرید (Long)"
+        elif negative_count > positive_count:
+            overall_sentiment = "🔴 **منفی**"
+            trading_result = "❌ فروش (Short)"
+        else:
+            overall_sentiment = "⚪ **خنثی**"
+            trading_result = "⏳ انتظار / بدون سیگنال روشن"
+        
+        # ساخت خروجی نهایی
+        result_text = f"📰 **اخبار مربوط به {symbol.upper()}**\n\n"
+        result_text += f"📊 **تعداد اخبار مثبت:** {positive_count}\n"
+        result_text += f"📊 **تعداد اخبار منفی:** {negative_count}\n\n"
+        
+        if positive_news:
+            result_text += "🟢 **اخبار مثبت:**\n"
+            for item in positive_news[:5]:
+                result_text += f"• {item['title']}\n"
+            result_text += "\n"
+        
+        if negative_news:
+            result_text += "🔴 **اخبار منفی:**\n"
+            for item in negative_news[:5]:
+                result_text += f"• {item['title']}\n"
+            result_text += "\n"
+        
+        result_text += f"📌 **سنتیمنت کلی بازار:** {overall_sentiment}\n"
+        result_text += f"💡 **نتیجه معاملاتی:** {trading_result}\n\n"
+        result_text += f"🔗 [مشاهده همه اخبار در CryptoPanic](https://cryptopanic.com/news/{symbol.lower()})"
+        
+        return result_text
+        
+    except Exception as e:
+        logger.error(f"Error fetching news from CryptoPanic: {e}")
+        # Fallback به گوگل نیوز
+        return get_news_from_google(symbol)
+
+def get_news_from_google(symbol, limit=5):
+    """Fallback: دریافت اخبار از گوگل نیوز (انگلیسی) با XML Parser"""
+    try:
+        import xml.etree.ElementTree as ET
+        import re
         query = f"{symbol} cryptocurrency"
-        # استفاده از زبان انگلیسی برای دریافت نتایج بیشتر
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
         
-        # parse XML
         root = ET.fromstring(response.content)
         channel = root.find('channel')
         if channel is None:
-            return []
+            return "❌ هیچ خبری یافت نشد."
         
         items = channel.findall('item')
-        news_list = []
-        for item in items[:limit]:
+        if not items:
+            return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
+        
+        result_text = f"📰 **اخبار مربوط به {symbol.upper()}** (Google News)\n\n"
+        for i, item in enumerate(items[:limit]):
             title_elem = item.find('title')
             title = title_elem.text if title_elem is not None else "بدون عنوان"
             link_elem = item.find('link')
             link = link_elem.text if link_elem is not None else "#"
-            desc_elem = item.find('description')
-            description = desc_elem.text if desc_elem is not None else ""
-            # حذف تگ‌های HTML
-            if description:
-                description = re.sub(r'<[^>]+>', '', description)
-                description = description[:300] + "..." if len(description) > 300 else description
-            
-            news_list.append({
-                'title': title,
-                'summary': description,
-                'link': link
-            })
-        return news_list
+            result_text += f"**{i+1}. {title}**\n"
+            result_text += f"🔗 [مشاهده خبر]({link})\n\n"
+        
+        return result_text
     except Exception as e:
-        logger.error(f"Error fetching news for {symbol}: {e}")
-        return None
+        logger.error(f"Google News fallback error: {e}")
+        return f"❌ خطا در دریافت اخبار برای `{symbol}`."
 
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
@@ -636,37 +721,7 @@ def handle_text_messages(message):
         
         processing_msg = bot.send_message(user_id, f"⏳ در حال دریافت اخبار مربوط به **{text}**... لطفاً صبر کنید.")
         
-        news_list = get_crypto_news(text, limit=5)
-        
-        # اگر خطا یا لیست خالی
-        if news_list is None:
-            bot.edit_message_text(
-                f"❌ خطا در دریافت اخبار برای `{text}`. لطفاً لحظاتی دیگر تلاش کنید.",
-                user_id,
-                processing_msg.message_id,
-                parse_mode='Markdown'
-            )
-            return
-        
-        if not news_list:
-            bot.edit_message_text(
-                f"📭 هیچ خبری برای `{text}` یافت نشد. ممکن است اخبار این ارز در دسترس نباشد.",
-                user_id,
-                processing_msg.message_id,
-                parse_mode='Markdown'
-            )
-            return
-        
-        # ساخت پیام خبری
-        news_text = f"📰 **اخبار مربوط به {text}**\n\n"
-        for i, item in enumerate(news_list, 1):
-            news_text += f"**{i}. {item['title']}**\n"
-            if item['summary']:
-                news_text += f"📌 {item['summary']}\n"
-            news_text += f"🔗 [مشاهده کامل خبر]({item['link']})\n\n"
-        
-        if len(news_text) > 4096:
-            news_text = news_text[:4000] + "\n\n... (اخبار بیشتر در لینک‌ها)"
+        news_text = get_crypto_news(text, limit=10)
         
         bot.edit_message_text(
             news_text,
