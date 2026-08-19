@@ -4,7 +4,7 @@ import requests
 import ccxt
 import sqlite3
 import time
-import feedparser
+import re
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
@@ -170,7 +170,6 @@ class PriceFetcher:
         return None
 
     def get_crypto_price(self, symbol="BTC/USDT"):
-        """دریافت قیمت از چند منبع (بدون نیاز به کلید)"""
         cache_key = f"crypto_{symbol}"
         cached = self._get_cached(cache_key)
         if cached:
@@ -203,7 +202,6 @@ def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
 def get_usd_irt():
-    """دلار/تومان با چند منبع (بدون کلید) - برای بخش تحلیل ارز دلخواه نگه داشته می‌شود"""
     cache_key = "usd_irt"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -276,28 +274,32 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار (با استفاده از RSS) ==========
+# ========== تابع دریافت اخبار (بدون feedparser) ==========
 def get_news(limit=5):
-    """دریافت اخبار اقتصادی و مالی از RSS گوگل نیوز"""
+    """دریافت اخبار اقتصادی و مالی از RSS گوگل نیوز با استفاده از requests و re"""
     try:
-        # RSS گوگل نیوز برای موضوعات اقتصادی (انگلیسی)
         rss_url = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(rss_url)
+        response = requests.get(rss_url, timeout=10)
+        response.raise_for_status()
         
+        # استخراج آیتم‌های RSS با regex
+        items = re.findall(r'<item>(.*?)</item>', response.text, re.DOTALL)
         news_list = []
-        for entry in feed.entries[:limit]:
-            # استخراج عنوان و خلاصه
-            title = entry.title
-            summary = entry.summary if hasattr(entry, 'summary') else ""
-            # حذف تگ‌های HTML از خلاصه
-            if summary:
-                import re
-                summary = re.sub(r'<[^>]+>', '', summary)
-                summary = summary[:150] + "..." if len(summary) > 150 else summary
-            link = entry.link
+        for item in items[:limit]:
+            title_match = re.search(r'<title>(.*?)</title>', item)
+            link_match = re.search(r'<link>(.*?)</link>', item)
+            description_match = re.search(r'<description>(.*?)</description>', item)
+            
+            title = title_match.group(1) if title_match else "بدون عنوان"
+            link = link_match.group(1) if link_match else "#"
+            description = description_match.group(1) if description_match else ""
+            # حذف تگ‌های HTML
+            description = re.sub(r'<[^>]+>', '', description)
+            description = description[:150] + "..." if len(description) > 150 else description
+            
             news_list.append({
                 'title': title,
-                'summary': summary,
+                'summary': description,
                 'link': link
             })
         return news_list
@@ -399,7 +401,6 @@ def handle_news(message):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     
-    # ارسال پیام "در حال دریافت..." برای نشان دادن فعالیت
     processing_msg = bot.send_message(user_id, "⏳ در حال دریافت آخرین اخبار... لطفاً صبر کنید.")
     
     news_list = get_news(limit=5)
@@ -407,7 +408,6 @@ def handle_news(message):
         bot.edit_message_text("❌ خطا در دریافت اخبار. لحظاتی دیگر تلاش کنید.", user_id, processing_msg.message_id)
         return
     
-    # ساخت پیام خبری
     news_text = "📰 **اخبار امروز و هفته (اقتصادی و مالی)**\n\n"
     for i, item in enumerate(news_list, 1):
         news_text += f"**{i}. {item['title']}**\n"
@@ -415,11 +415,9 @@ def handle_news(message):
             news_text += f"📌 {item['summary']}\n"
         news_text += f"🔗 [مشاهده کامل خبر]({item['link']})\n\n"
     
-    # اگر طول پیام بیش از حد مجاز بود، آن را تقسیم کن
     if len(news_text) > 4096:
         news_text = news_text[:4000] + "\n\n... (اخبار بیشتر در لینک‌ها)"
     
-    # ویرایش پیام "در حال دریافت" به پیام نهایی
     bot.edit_message_text(news_text, user_id, processing_msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
 
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
@@ -446,7 +444,6 @@ def analyze_step(message):
         bot.send_message(user_id, "❌ نام ارز معتبر وارد کنید.")
         return
     
-    # تبدیل خودکار برای فارکس به جفت‌ارزهای USDT در بایننس
     if symbol == "EURUSD":
         symbol = "EUR/USDT"
     elif symbol == "GBPUSD":
@@ -465,7 +462,6 @@ def analyze_step(message):
             text = "❌ ارز مورد نظر یافت نشد."
     else:
         if len(symbol) == 6:
-            # تلاش برای فارکس از طریق بایننس
             pair = f"{symbol[:3]}/{symbol[3:]}"
             if pair in ["EUR/USD", "GBP/USD"]:
                 pair = pair.replace("/USD", "/USDT")
