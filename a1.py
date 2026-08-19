@@ -10,7 +10,6 @@ from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from newspaper import Article
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -28,7 +27,17 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-waiting_for_symbol = {}
+# وضعیت‌های کاربری
+waiting_for_symbol = {}  # {'user_id': 'news_symbol'} برای تشخیص اینکه کاربر منتظر ورود نماد اخبار است
+
+# ========== لیست نمادهای معتبر برای اخبار ==========
+VALID_CRYPTO_SYMBOLS = {
+    "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
+    "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
+    "BCH", "HYPE", "BGB", "XMR", "PI", "PEPE", "UNI", "APT", "OKB",
+    "ONDO", "NEAR", "TRUMP", "TAO", "ICP", "KAS", "ETC", "AAVE", "MNT",
+    "ENA", "FIL", "FARTCOIN"
+}
 
 # ---------- دیتابیس ----------
 conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
@@ -275,12 +284,13 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار با استخراج متن کامل ==========
-def get_news(limit=3):
-    """دریافت اخبار و استخراج متن کامل با newspaper3k"""
+# ========== تابع دریافت اخبار اختصاصی هر ارز ==========
+def get_crypto_news(symbol, limit=5):
+    """دریافت اخبار مربوط به یک ارز خاص با جستجوی RSS گوگل نیوز"""
     try:
-        # RSS گوگل نیوز (فارسی)
-        rss_url = "https://news.google.com/rss?hl=fa&gl=IR&ceid=IR:fa"
+        # جستجوی خبر با عبارت "{symbol} crypto" در گوگل نیوز فارسی
+        query = f"{symbol} crypto"
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=fa&gl=IR&ceid=IR:fa"
         response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
         
@@ -296,38 +306,18 @@ def get_news(limit=3):
             title = title_match.group(1) if title_match else "بدون عنوان"
             link = link_match.group(1) if link_match else "#"
             description = description_match.group(1) if description_match else ""
+            # حذف تگ‌های HTML از خلاصه
             description = re.sub(r'<[^>]+>', '', description)
-            
-            # ===== استخراج متن کامل با newspaper3k =====
-            full_text = ""
-            try:
-                article = Article(link, language='fa')
-                article.download()
-                article.parse()
-                if article.text:
-                    # محدود کردن متن به 2000 کاراکتر
-                    full_text = article.text[:2000]
-                    if len(article.text) > 2000:
-                        full_text += "..."
-                else:
-                    full_text = description[:300]
-            except Exception as e:
-                logger.warning(f"Newspaper error for {link}: {e}")
-                full_text = description[:300]
-            
-            # اگر متن کامل خالی بود، از description استفاده کن
-            if not full_text or len(full_text) < 50:
-                full_text = description[:300]
+            description = description[:300] + "..." if len(description) > 300 else description
             
             news_list.append({
                 'title': title,
-                'full_text': full_text,
+                'summary': description,
                 'link': link
             })
-        
         return news_list
     except Exception as e:
-        logger.error(f"Error fetching news: {e}")
+        logger.error(f"Error fetching news for {symbol}: {e}")
         return None
 
 # ---------- دکمه‌های منو ----------
@@ -408,7 +398,7 @@ def stats_command(message):
     total_users = c.fetchone()[0]
     bot.send_message(user_id, f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}", parse_mode='Markdown')
 
-# ---------- بقیه هندلرها ----------
+# ---------- هندلر دکمه‌های اصلی ----------
 @bot.message_handler(func=lambda msg: msg.text == "📊 قیمت لحظه‌ای")
 def handle_price(message):
     user_id = message.chat.id
@@ -424,26 +414,21 @@ def handle_news(message):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     
-    processing_msg = bot.send_message(user_id, "⏳ در حال دریافت آخرین اخبار... لطفاً صبر کنید.")
+    # تنظیم وضعیت کاربر برای دریافت نماد
+    waiting_for_symbol[user_id] = "news_symbol"
     
-    news_list = get_news(limit=3)
-    if not news_list:
-        bot.edit_message_text("❌ خطا در دریافت اخبار. لحظاتی دیگر تلاش کنید.", user_id, processing_msg.message_id)
-        return
-    
-    # ساخت پیام خبری با متن کامل
-    news_text = "📰 **آخرین اخبار اقتصادی و مالی (فارسی)**\n\n"
-    for i, item in enumerate(news_list, 1):
-        news_text += f"**{i}. {item['title']}**\n\n"
-        news_text += f"{item['full_text']}\n\n"
-        news_text += f"🔗 [لینک کامل خبر]({item['link']})\n\n"
-        news_text += "---\n\n"
-    
-    # محدودیت پیام تلگرام 4096 کاراکتر
-    if len(news_text) > 4096:
-        news_text = news_text[:4000] + "\n\n... (متن کامل در لینک‌ها)"
-    
-    bot.edit_message_text(news_text, user_id, processing_msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
+    # ساخت پیام راهنما با لیست نمادها
+    symbols_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
+    help_text = (
+        "🔍 **دریافت اخبار اختصاصی ارزهای دیجیتال**\n\n"
+        "لطفاً فقط **نماد** ارز مورد نظر را وارد کنید.\n"
+        "تحلیل اخبار برای نمادهای زیر در دسترس است:\n\n"
+        f"`{symbols_list}`\n\n"
+        "📌 مثال: `BTC` یا `ETH` یا `ADA`\n\n"
+        "⏳ اخبار هر ۲۴ ساعت به‌روزرسانی می‌شود.\n"
+        "💰 نمایش اخبار **رایگان** است و از اعتبار شما کم نمی‌شود."
+    )
+    bot.send_message(user_id, help_text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
@@ -541,7 +526,7 @@ def handle_help(message):
     help_text = (
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
-        "📰 اخبار: اخبار امروز و هفته (اقتصادی و مالی) با متن کامل\n"
+        "📰 اخبار: دریافت اخبار اختصاصی هر ارز با وارد کردن نماد\n"
         "📈 سیگنال: سیگنال‌های خرید و فروش (به‌زودی)\n"
         "🔍 تحلیل: تحلیل تکنیکال و بنیادی ارز دلخواه\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
@@ -622,6 +607,62 @@ def callback_back_main(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
+
+# ---------- هندلر پیام‌های متنی (برای دریافت نماد اخبار) ----------
+@bot.message_handler(func=lambda msg: True)
+def handle_text_messages(message):
+    user_id = message.chat.id
+    text = message.text.strip().upper()
+
+    # ===== اگر کاربر در حالت دریافت نماد اخبار است =====
+    if waiting_for_symbol.get(user_id) == "news_symbol":
+        waiting_for_symbol.pop(user_id, None)  # حذف وضعیت
+        
+        # اعتبارسنجی نماد
+        if text not in VALID_CRYPTO_SYMBOLS:
+            symbols_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
+            bot.send_message(
+                user_id,
+                f"❌ نماد `{text}` معتبر نیست.\n\nلطفاً یکی از نمادهای زیر را وارد کنید:\n`{symbols_list}`",
+                parse_mode='Markdown'
+            )
+            # بازگرداندن کاربر به حالت انتخاب نماد
+            waiting_for_symbol[user_id] = "news_symbol"
+            return
+        
+        # ارسال پیام "در حال دریافت..."
+        processing_msg = bot.send_message(user_id, f"⏳ در حال دریافت اخبار مربوط به **{text}**... لطفاً صبر کنید.")
+        
+        # دریافت اخبار
+        news_list = get_crypto_news(text, limit=5)
+        if not news_list:
+            bot.edit_message_text(
+                f"❌ خطا در دریافت اخبار برای `{text}`. لحظاتی دیگر تلاش کنید.",
+                user_id,
+                processing_msg.message_id,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # ساخت پیام خبری
+        news_text = f"📰 **اخبار مربوط به {text}**\n\n"
+        for i, item in enumerate(news_list, 1):
+            news_text += f"**{i}. {item['title']}**\n"
+            if item['summary']:
+                news_text += f"📌 {item['summary']}\n"
+            news_text += f"🔗 [مشاهده کامل خبر]({item['link']})\n\n"
+        
+        if len(news_text) > 4096:
+            news_text = news_text[:4000] + "\n\n... (اخبار بیشتر در لینک‌ها)"
+        
+        bot.edit_message_text(
+            news_text,
+            user_id,
+            processing_msg.message_id,
+            parse_mode='Markdown',
+            disable_web_page_preview=True
+        )
+        return
 
 # ---------- مسیرهای Webhook ----------
 @app.route('/webhook', methods=['POST'])
