@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from newspaper import Article
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -274,17 +275,19 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار (بدون feedparser) ==========
-def get_news(limit=5):
-    """دریافت اخبار اقتصادی و مالی از RSS گوگل نیوز با استفاده از requests و re"""
+# ========== تابع دریافت اخبار با استخراج متن کامل ==========
+def get_news(limit=3):
+    """دریافت اخبار و استخراج متن کامل با newspaper3k"""
     try:
-        rss_url = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+        # RSS گوگل نیوز (فارسی)
+        rss_url = "https://news.google.com/rss?hl=fa&gl=IR&ceid=IR:fa"
         response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
         
-        # استخراج آیتم‌های RSS با regex
+        # استخراج آیتم‌های RSS
         items = re.findall(r'<item>(.*?)</item>', response.text, re.DOTALL)
         news_list = []
+        
         for item in items[:limit]:
             title_match = re.search(r'<title>(.*?)</title>', item)
             link_match = re.search(r'<link>(.*?)</link>', item)
@@ -293,15 +296,35 @@ def get_news(limit=5):
             title = title_match.group(1) if title_match else "بدون عنوان"
             link = link_match.group(1) if link_match else "#"
             description = description_match.group(1) if description_match else ""
-            # حذف تگ‌های HTML
             description = re.sub(r'<[^>]+>', '', description)
-            description = description[:150] + "..." if len(description) > 150 else description
+            
+            # ===== استخراج متن کامل با newspaper3k =====
+            full_text = ""
+            try:
+                article = Article(link, language='fa')
+                article.download()
+                article.parse()
+                if article.text:
+                    # محدود کردن متن به 2000 کاراکتر
+                    full_text = article.text[:2000]
+                    if len(article.text) > 2000:
+                        full_text += "..."
+                else:
+                    full_text = description[:300]
+            except Exception as e:
+                logger.warning(f"Newspaper error for {link}: {e}")
+                full_text = description[:300]
+            
+            # اگر متن کامل خالی بود، از description استفاده کن
+            if not full_text or len(full_text) < 50:
+                full_text = description[:300]
             
             news_list.append({
                 'title': title,
-                'summary': description,
+                'full_text': full_text,
                 'link': link
             })
+        
         return news_list
     except Exception as e:
         logger.error(f"Error fetching news: {e}")
@@ -403,20 +426,22 @@ def handle_news(message):
     
     processing_msg = bot.send_message(user_id, "⏳ در حال دریافت آخرین اخبار... لطفاً صبر کنید.")
     
-    news_list = get_news(limit=5)
+    news_list = get_news(limit=3)
     if not news_list:
         bot.edit_message_text("❌ خطا در دریافت اخبار. لحظاتی دیگر تلاش کنید.", user_id, processing_msg.message_id)
         return
     
-    news_text = "📰 **اخبار امروز و هفته (اقتصادی و مالی)**\n\n"
+    # ساخت پیام خبری با متن کامل
+    news_text = "📰 **آخرین اخبار اقتصادی و مالی (فارسی)**\n\n"
     for i, item in enumerate(news_list, 1):
-        news_text += f"**{i}. {item['title']}**\n"
-        if item['summary']:
-            news_text += f"📌 {item['summary']}\n"
-        news_text += f"🔗 [مشاهده کامل خبر]({item['link']})\n\n"
+        news_text += f"**{i}. {item['title']}**\n\n"
+        news_text += f"{item['full_text']}\n\n"
+        news_text += f"🔗 [لینک کامل خبر]({item['link']})\n\n"
+        news_text += "---\n\n"
     
+    # محدودیت پیام تلگرام 4096 کاراکتر
     if len(news_text) > 4096:
-        news_text = news_text[:4000] + "\n\n... (اخبار بیشتر در لینک‌ها)"
+        news_text = news_text[:4000] + "\n\n... (متن کامل در لینک‌ها)"
     
     bot.edit_message_text(news_text, user_id, processing_msg.message_id, parse_mode='Markdown', disable_web_page_preview=True)
 
@@ -516,7 +541,7 @@ def handle_help(message):
     help_text = (
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
-        "📰 اخبار: اخبار امروز و هفته (اقتصادی و مالی)\n"
+        "📰 اخبار: اخبار امروز و هفته (اقتصادی و مالی) با متن کامل\n"
         "📈 سیگنال: سیگنال‌های خرید و فروش (به‌زودی)\n"
         "🔍 تحلیل: تحلیل تکنیکال و بنیادی ارز دلخواه\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
