@@ -5,6 +5,7 @@ import ccxt
 import sqlite3
 import time
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
@@ -27,8 +28,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# وضعیت‌های کاربری
-waiting_for_symbol = {}  # {'user_id': 'news_symbol'} برای تشخیص اینکه کاربر منتظر ورود نماد اخبار است
+waiting_for_symbol = {}
 
 # ========== لیست نمادهای معتبر برای اخبار ==========
 VALID_CRYPTO_SYMBOLS = {
@@ -284,31 +284,38 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار اختصاصی هر ارز ==========
+# ========== تابع دریافت اخبار اختصاصی هر ارز (با XML Parser) ==========
 def get_crypto_news(symbol, limit=5):
-    """دریافت اخبار مربوط به یک ارز خاص با جستجوی RSS گوگل نیوز"""
+    """
+    دریافت اخبار مربوط به یک ارز با استفاده از RSS گوگل نیوز (انگلیسی)
+    و parse با xml.etree.ElementTree
+    """
     try:
-        # جستجوی خبر با عبارت "{symbol} crypto" در گوگل نیوز فارسی
-        query = f"{symbol} crypto"
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=fa&gl=IR&ceid=IR:fa"
+        query = f"{symbol} cryptocurrency"
+        # استفاده از زبان انگلیسی برای دریافت نتایج بیشتر
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
         
-        # استخراج آیتم‌های RSS
-        items = re.findall(r'<item>(.*?)</item>', response.text, re.DOTALL)
-        news_list = []
+        # parse XML
+        root = ET.fromstring(response.content)
+        channel = root.find('channel')
+        if channel is None:
+            return []
         
+        items = channel.findall('item')
+        news_list = []
         for item in items[:limit]:
-            title_match = re.search(r'<title>(.*?)</title>', item)
-            link_match = re.search(r'<link>(.*?)</link>', item)
-            description_match = re.search(r'<description>(.*?)</description>', item)
-            
-            title = title_match.group(1) if title_match else "بدون عنوان"
-            link = link_match.group(1) if link_match else "#"
-            description = description_match.group(1) if description_match else ""
-            # حذف تگ‌های HTML از خلاصه
-            description = re.sub(r'<[^>]+>', '', description)
-            description = description[:300] + "..." if len(description) > 300 else description
+            title_elem = item.find('title')
+            title = title_elem.text if title_elem is not None else "بدون عنوان"
+            link_elem = item.find('link')
+            link = link_elem.text if link_elem is not None else "#"
+            desc_elem = item.find('description')
+            description = desc_elem.text if desc_elem is not None else ""
+            # حذف تگ‌های HTML
+            if description:
+                description = re.sub(r'<[^>]+>', '', description)
+                description = description[:300] + "..." if len(description) > 300 else description
             
             news_list.append({
                 'title': title,
@@ -414,17 +421,15 @@ def handle_news(message):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     
-    # تنظیم وضعیت کاربر برای دریافت نماد
     waiting_for_symbol[user_id] = "news_symbol"
     
-    # ساخت پیام راهنما با لیست نمادها
     symbols_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     help_text = (
         "🔍 **دریافت اخبار اختصاصی ارزهای دیجیتال**\n\n"
         "لطفاً فقط **نماد** ارز مورد نظر را وارد کنید.\n"
         "تحلیل اخبار برای نمادهای زیر در دسترس است:\n\n"
         f"`{symbols_list}`\n\n"
-        "📌 مثال: `BTC` یا `ETH` یا `ADA`\n\n"
+        "📌 مثال: `BTC` یا `ETH`\n\n"
         "⏳ اخبار هر ۲۴ ساعت به‌روزرسانی می‌شود.\n"
         "💰 نمایش اخبار **رایگان** است و از اعتبار شما کم نمی‌شود."
     )
@@ -616,7 +621,7 @@ def handle_text_messages(message):
 
     # ===== اگر کاربر در حالت دریافت نماد اخبار است =====
     if waiting_for_symbol.get(user_id) == "news_symbol":
-        waiting_for_symbol.pop(user_id, None)  # حذف وضعیت
+        waiting_for_symbol.pop(user_id, None)
         
         # اعتبارسنجی نماد
         if text not in VALID_CRYPTO_SYMBOLS:
@@ -626,18 +631,26 @@ def handle_text_messages(message):
                 f"❌ نماد `{text}` معتبر نیست.\n\nلطفاً یکی از نمادهای زیر را وارد کنید:\n`{symbols_list}`",
                 parse_mode='Markdown'
             )
-            # بازگرداندن کاربر به حالت انتخاب نماد
             waiting_for_symbol[user_id] = "news_symbol"
             return
         
-        # ارسال پیام "در حال دریافت..."
         processing_msg = bot.send_message(user_id, f"⏳ در حال دریافت اخبار مربوط به **{text}**... لطفاً صبر کنید.")
         
-        # دریافت اخبار
         news_list = get_crypto_news(text, limit=5)
+        
+        # اگر خطا یا لیست خالی
+        if news_list is None:
+            bot.edit_message_text(
+                f"❌ خطا در دریافت اخبار برای `{text}`. لطفاً لحظاتی دیگر تلاش کنید.",
+                user_id,
+                processing_msg.message_id,
+                parse_mode='Markdown'
+            )
+            return
+        
         if not news_list:
             bot.edit_message_text(
-                f"❌ خطا در دریافت اخبار برای `{text}`. لحظاتی دیگر تلاش کنید.",
+                f"📭 هیچ خبری برای `{text}` یافت نشد. ممکن است اخبار این ارز در دسترس نباشد.",
                 user_id,
                 processing_msg.message_id,
                 parse_mode='Markdown'
