@@ -4,7 +4,6 @@ import requests
 import ccxt
 import sqlite3
 import time
-import xml.etree.ElementTree as ET
 import re
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -285,162 +284,143 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار با تحلیل سنتیمنت ==========
+# ========== تابع دریافت اخبار با تحلیل سنتیمنت (API جدید) ==========
 @lru_cache(maxsize=100)
-def get_crypto_news_cached(symbol, limit=10):
+def get_crypto_news_cached(symbol, limit=5):
     """نسخه کش‌شده برای کاهش درخواست‌های تکراری"""
     return get_crypto_news(symbol, limit)
 
-def get_crypto_news(symbol, limit=10):
+def get_crypto_news(symbol, limit=5):
     """
-    دریافت اخبار مربوط به یک ارز از CryptoPanic و تحلیل سنتیمنت
-    با Fallback به گوگل نیوز در صورت بروز خطا
+    دریافت اخبار مربوط به یک ارز از Free Crypto News API
+    منبع: https://cryptocurrency.cv
+    این API رایگان، بدون کلید و بسیار پایدار است.
     """
-    # ===== منبع اول: CryptoPanic =====
     try:
-        url = "https://cryptopanic.com/api/v1/posts/"
-        params = {
-            'auth_token': '',
-            'currencies': symbol.lower(),
-            'kind': 'news',
-            'public': 'true',
-            'filter': 'hot'
-        }
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-        
-        if data.get('results'):
-            positive = []
-            negative = []
-            neutral = []
-            
-            for post in data['results'][:limit]:
-                title = post.get('title', 'بدون عنوان')
-                link = post.get('url', '#')
-                sentiment = 'neutral'
-                for tag in post.get('tags', []):
-                    if tag.get('slug') in ['bullish', 'positive']:
-                        sentiment = 'positive'
-                        break
-                    elif tag.get('slug') in ['bearish', 'negative']:
-                        sentiment = 'negative'
-                        break
-                
-                if sentiment == 'positive':
-                    positive.append({'title': title, 'link': link})
-                elif sentiment == 'negative':
-                    negative.append({'title': title, 'link': link})
-                else:
-                    neutral.append({'title': title, 'link': link})
-            
-            # ===== تحلیل کلی =====
-            pos_count = len(positive)
-            neg_count = len(negative)
-            neutral_count = len(neutral)
-            total = pos_count + neg_count + neutral_count
-            
-            # سنتیمنت کلی
-            if pos_count > neg_count:
-                overall_sentiment = "🟢 **مثبت**"
-                trading_result = "✅ خرید (Long)"
-            elif neg_count > pos_count:
-                overall_sentiment = "🔴 **منفی**"
-                trading_result = "❌ فروش (Short)"
-            else:
-                overall_sentiment = "⚪ **خنثی**"
-                trading_result = "⏳ انتظار / بدون سیگنال روشن"
-            
-            # سطح اطمینان (بر اساس تعداد اخبار)
-            if total >= 5:
-                confidence = "بالا"
-            elif total >= 3:
-                confidence = "متوسط"
-            else:
-                confidence = "پایین"
-            
-            # ===== ساخت پیام نهایی =====
-            text = f"📰 **تحلیل اخبار {symbol.upper()}**\n\n"
-            
-            # اخبار مثبت
-            if positive:
-                text += "🟢 **اخبار مثبت:**\n"
-                for item in positive[:3]:
-                    text += f"• {item['title']}\n"
-                text += "\n"
-            
-            # اخبار منفی
-            if negative:
-                text += "🔴 **اخبار منفی:**\n"
-                for item in negative[:3]:
-                    text += f"• {item['title']}\n"
-                text += "\n"
-            
-            # اخبار خنثی (اختیاری)
-            if neutral and len(neutral) > 0:
-                text += "⚪ **اخبار خنثی:**\n"
-                for item in neutral[:2]:
-                    text += f"• {item['title']}\n"
-                text += "\n"
-            
-            # تحلیل کلی
-            text += f"📌 **سنتیمنت کلی بازار:** {overall_sentiment}\n"
-            text += f"💡 **نتیجه معاملاتی:** {trading_result}\n"
-            text += f"📊 **اطمینان:** {confidence} - {total} خبر تحلیل شد\n\n"
-            text += f"🔗 [مشاهده همه اخبار](https://cryptopanic.com/news/{symbol.lower()})"
-            
-            if len(text) > 4096:
-                text = text[:4000] + "\n\n... (ادامه در لینک)"
-            
-            return text
-            
-    except Exception as e:
-        logger.warning(f"CryptoPanic error: {e}")
-    
-    # ===== Fallback: گوگل نیوز =====
-    try:
-        query = f"{symbol} cryptocurrency news"
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        
-        response = requests.get(rss_url, headers=headers, timeout=10)
+        # ارسال درخواست به API
+        url = f"https://cryptocurrency.cv/api/news?ticker={symbol.lower()}&limit={limit}"
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         
-        root = ET.fromstring(response.content)
-        channel = root.find('channel')
-        if channel is None:
-            return "❌ ساختار RSS نامعتبر است."
+        data = response.json()
         
-        items = channel.findall('item')
-        if not items:
+        # بررسی وجود اخبار در پاسخ
+        if not data or 'articles' not in data or not data['articles']:
             return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
+
+        # ===== کلمات کلیدی برای تحلیل سنتیمنت =====
+        positive_keywords = [
+            'surge', 'rally', 'gain', 'positive', 'bullish', 'approved', 'launch',
+            'partnership', 'adoption', 'breakthrough', 'record', 'high', 'upgrade',
+            'mainnet', 'integration', 'collaboration', 'investment', 'funding'
+        ]
+        negative_keywords = [
+            'drop', 'crash', 'decline', 'negative', 'bearish', 'reject', 'fraud',
+            'hack', 'ban', 'restriction', 'delay', 'scam', 'loss', 'warning',
+            'investigation', 'fine', 'penalty', 'lawsuit'
+        ]
         
-        text = f"📰 **اخبار مربوط به {symbol.upper()}** (Google News)\n\n"
-        count = 0
-        for item in items[:5]:
-            title = item.find('title').text if item.find('title') is not None else "بدون عنوان"
-            link = item.find('link').text if item.find('link') is not None else "#"
-            desc = item.find('description').text if item.find('description') is not None else ""
-            if desc:
-                desc = re.sub(r'<[^>]+>', '', desc)
-                desc = desc[:200] + "..." if len(desc) > 200 else desc
+        positive_news = []
+        negative_news = []
+        neutral_news = []
+        
+        # تحلیل هر خبر
+        for article in data['articles'][:limit]:
+            title = article.get('title', '')
+            description = article.get('description', '')
+            combined_text = (title + ' ' + description).lower()
             
-            count += 1
-            text += f"**{count}. {title}**\n"
-            if desc:
-                text += f"📌 {desc}\n"
-            text += f"🔗 [مشاهده خبر]({link})\n\n"
+            # امتیازدهی
+            pos_score = sum(1 for word in positive_keywords if word in combined_text)
+            neg_score = sum(1 for word in negative_keywords if word in combined_text)
+            
+            if pos_score > neg_score:
+                sentiment = 'positive'
+            elif neg_score > pos_score:
+                sentiment = 'negative'
+            else:
+                sentiment = 'neutral'
+            
+            # ایجاد آیتم خبری
+            news_item = {
+                'title': title,
+                'link': article.get('url', '#'),
+                'source': article.get('source', {}).get('name', 'منبع نامشخص')
+            }
+            
+            if sentiment == 'positive':
+                positive_news.append(news_item)
+            elif sentiment == 'negative':
+                negative_news.append(news_item)
+            else:
+                neutral_news.append(news_item)
+
+        # ===== تحلیل کلی =====
+        pos_count = len(positive_news)
+        neg_count = len(negative_news)
+        neutral_count = len(neutral_news)
+        total = pos_count + neg_count + neutral_count
         
-        if count == 0:
-            return f"📭 هیچ خبری برای `{symbol}` در دسترس نیست."
+        # سنتیمنت کلی
+        if pos_count > neg_count:
+            overall_sentiment = "🟢 **مثبت**"
+            trading_result = "✅ خرید (Long)"
+        elif neg_count > pos_count:
+            overall_sentiment = "🔴 **منفی**"
+            trading_result = "❌ فروش (Short)"
+        else:
+            overall_sentiment = "⚪ **خنثی**"
+            trading_result = "⏳ انتظار / بدون سیگنال روشن"
+        
+        # سطح اطمینان (بر اساس تعداد اخبار)
+        if total >= 5:
+            confidence = "بالا"
+        elif total >= 3:
+            confidence = "متوسط"
+        else:
+            confidence = "پایین"
+        
+        # ===== ساخت پیام نهایی =====
+        text = f"📰 **تحلیل اخبار {symbol.upper()}**\n\n"
+        
+        # اخبار مثبت
+        if positive_news:
+            text += "🟢 **اخبار مثبت:**\n"
+            for item in positive_news[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        
+        # اخبار منفی
+        if negative_news:
+            text += "🔴 **اخبار منفی:**\n"
+            for item in negative_news[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        
+        # اخبار خنثی (اختیاری)
+        if neutral_news and len(neutral_news) > 0:
+            text += "⚪ **اخبار خنثی:**\n"
+            for item in neutral_news[:2]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        
+        # تحلیل کلی
+        text += f"📌 **سنتیمنت کلی بازار:** {overall_sentiment}\n"
+        text += f"💡 **نتیجه معاملاتی:** {trading_result}\n"
+        text += f"📊 **اطمینان:** {confidence} - {total} خبر تحلیل شد\n\n"
+        text += f"🔗 [مشاهده همه اخبار](https://cryptocurrency.cv/news?ticker={symbol.lower()})"
         
         if len(text) > 4096:
-            text = text[:4000] + "\n\n... (ادامه اخبار در لینک‌ها)"
+            text = text[:4000] + "\n\n... (ادامه در لینک)"
         
         return text
-        
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching news for {symbol}: {e}")
+        return f"❌ خطا در دریافت اخبار برای `{symbol}`. لطفاً مجدداً تلاش کنید."
     except Exception as e:
-        logger.error(f"Google News error: {e}")
-        return f"❌ خطا در دریافت اخبار برای `{symbol}`: {str(e)[:100]}"
+        logger.error(f"Unexpected error for {symbol}: {e}")
+        return f"❌ خطای غیرمنتظره در دریافت اخبار برای `{symbol}`: {str(e)[:100]}"
 
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
@@ -761,7 +741,7 @@ def handle_text_messages(message):
         )
         
         try:
-            news_text = get_crypto_news_cached(text, limit=10)
+            news_text = get_crypto_news_cached(text, limit=5)
             
             bot.send_message(
                 user_id,
