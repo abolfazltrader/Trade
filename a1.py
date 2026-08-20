@@ -13,6 +13,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from urllib.parse import quote
+from deep_translator import GoogleTranslator
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -292,6 +293,27 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
+# ========== توابع ترجمه ==========
+translation_cache = {}
+
+def translate_to_persian(text):
+    if not text:
+        return text
+    if len(text) < 3 or text.isdigit():
+        return text
+    if text in translation_cache:
+        return translation_cache[text]
+    try:
+        translated = GoogleTranslator(source='auto', target='fa').translate(text)
+        if translated:
+            translation_cache[text] = translated
+            return translated
+        else:
+            return text
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return text
+
 # ========== توابع دریافت اخبار ==========
 
 # ----- توابع کمکی برای پردازش RSS و تحلیل احساسات -----
@@ -312,7 +334,6 @@ def build_news_message(symbol, news_items, source_name):
     if not news_items:
         return f"📭 هیچ خبری برای `{symbol}` از منبع {source_name} یافت نشد."
     
-    # دسته‌بندی بر اساس sentiment
     positive = [n for n in news_items if n['sentiment'] == 'positive']
     negative = [n for n in news_items if n['sentiment'] == 'negative']
     neutral = [n for n in news_items if n['sentiment'] == 'neutral']
@@ -367,8 +388,8 @@ def fetch_cryptopanic(symbol, limit=5):
         news_items = []
         for post in data['results'][:limit]:
             title = post.get('title', 'بدون عنوان')
+            title = translate_to_persian(title)
             link = post.get('url', '#')
-            # تشخیص احساسات از تگ‌ها
             sentiment = 'neutral'
             for tag in post.get('tags', []):
                 if tag.get('slug') in ['bullish', 'positive']:
@@ -405,8 +426,9 @@ def fetch_bing_news(symbol, limit=5, market='crypto'):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title = title_elem.text if title_elem is not None else "بدون عنوان"
+            title = translate_to_persian(title)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment(title)
+            sentiment = analyze_sentiment(title_elem.text if title_elem is not None else "")
             news_items.append({'title': title, 'link': link, 'sentiment': sentiment})
         return news_items
     except Exception as e:
@@ -435,8 +457,9 @@ def fetch_google_news(symbol, limit=5, market='crypto'):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title = title_elem.text if title_elem is not None else "بدون عنوان"
+            title = translate_to_persian(title)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment(title)
+            sentiment = analyze_sentiment(title_elem.text if title_elem is not None else "")
             news_items.append({'title': title, 'link': link, 'sentiment': sentiment})
         return news_items
     except Exception as e:
@@ -486,7 +509,7 @@ def get_cached_news(symbol, limit=5, is_crypto=True):
     cache_key = f"{'crypto' if is_crypto else 'forex'}_{symbol}_{limit}"
     if cache_key in news_cache:
         data, timestamp = news_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < 300:  # 5 دقیقه
+        if (datetime.now() - timestamp).seconds < 300:
             return data
     if is_crypto:
         result = get_crypto_news(symbol, limit)
@@ -495,7 +518,7 @@ def get_cached_news(symbol, limit=5, is_crypto=True):
     news_cache[cache_key] = (result, datetime.now())
     return result
 
-# ---------- دکمه‌های منو (بدون تغییر) ----------
+# ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_price = KeyboardButton("📊 قیمت لحظه‌ای")
