@@ -285,7 +285,7 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار از گوگل نیوز (با کش) ==========
+# ========== تابع دریافت اخبار (CryptoPanic + Fallback گوگل نیوز) ==========
 @lru_cache(maxsize=100)
 def get_crypto_news_cached(symbol, limit=5):
     """نسخه کش‌شده برای کاهش درخواست‌های تکراری"""
@@ -293,14 +293,119 @@ def get_crypto_news_cached(symbol, limit=5):
 
 def get_crypto_news(symbol, limit=5):
     """
-    دریافت اخبار مربوط به یک ارز از گوگل نیوز با استفاده از RSS
-    بدون نیاز به هیچ کلید API
+    دریافت اخبار مربوط به یک ارز:
+    1. اول از CryptoPanic (رایگان، بدون کلید)
+    2. در صورت خطا، از گوگل نیوز به عنوان Fallback
     """
+    # ===== منبع اول: CryptoPanic =====
+    try:
+        url = "https://cryptopanic.com/api/v1/posts/"
+        params = {
+            'auth_token': '',  # خالی برای دسترسی رایگان (محدودیت دارد)
+            'currencies': symbol.lower(),
+            'kind': 'news',
+            'public': 'true',
+            'filter': 'hot'  # داغ‌ترین اخبار
+        }
+        response = requests.get(url, params=params, timeout=8)
+        data = response.json()
+        
+        if data.get('results'):
+            # ساختاردهی اخبار به صورت لیست
+            news_items = []
+            for post in data['results'][:limit]:
+                title = post.get('title', 'بدون عنوان')
+                link = post.get('url', '#')
+                # تشخیص احساسات (اگر وجود داشت)
+                sentiment = 'neutral'
+                for tag in post.get('tags', []):
+                    if tag.get('slug') in ['bullish', 'positive']:
+                        sentiment = 'positive'
+                        break
+                    elif tag.get('slug') in ['bearish', 'negative']:
+                        sentiment = 'negative'
+                        break
+                news_items.append({
+                    'title': title,
+                    'link': link,
+                    'sentiment': sentiment
+                })
+            
+            # دسته‌بندی اخبار
+            positive_news = [n for n in news_items if n['sentiment'] == 'positive']
+            negative_news = [n for n in news_items if n['sentiment'] == 'negative']
+            neutral_news = [n for n in news_items if n['sentiment'] == 'neutral']
+            
+            text = f"📰 **اخبار مربوط به {symbol.upper()}** (CryptoPanic)\n\n"
+            if positive_news:
+                text += "🟢 **اخبار مثبت:**\n"
+                for item in positive_news[:3]:
+                    text += f"• {item['title']}\n"
+                text += "\n"
+            if negative_news:
+                text += "🔴 **اخبار منفی:**\n"
+                for item in negative_news[:3]:
+                    text += f"• {item['title']}\n"
+                text += "\n"
+            if neutral_news:
+                text += "⚪ **اخبار خنثی:**\n"
+                for item in neutral_news[:3]:
+                    text += f"• {item['title']}\n"
+                text += "\n"
+            
+            # سنتیمنت کلی
+            pos_count = len(positive_news)
+            neg_count = len(negative_news)
+            if pos_count > neg_count:
+                sentiment_text = "🟢 **مثبت**"
+                trading_result = "✅ خرید (Long)"
+            elif neg_count > pos_count:
+                sentiment_text = "🔴 **منفی**"
+                trading_result = "❌ فروش (Short)"
+            else:
+                sentiment_text = "⚪ **خنثی**"
+                trading_result = "⏳ انتظار / بدون سیگنال روشن"
+            
+            text += f"📌 **سنتیمنت کلی بازار:** {sentiment_text}\n"
+            text += f"💡 **نتیجه معاملاتی:** {trading_result}\n\n"
+            text += f"🔗 [مشاهده همه اخبار در CryptoPanic](https://cryptopanic.com/news/{symbol.lower()})"
+            
+            if len(text) > 4096:
+                text = text[:4000] + "\n\n... (ادامه در لینک)"
+            
+            return text
+            
+    except Exception as e:
+        logger.warning(f"CryptoPanic error for {symbol}: {e}")
+        # در صورت خطا، به Fallback برو
+    
+    # ===== منبع دوم (Fallback): گوگل نیوز با User-Agent مناسب و تلاش مجدد =====
     try:
         query = f"{symbol} cryptocurrency news"
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        # تلاش مجدد تا ۲ بار
+        response = None
+        for attempt in range(2):
+            try:
+                response = requests.get(rss_url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    break
+                elif response.status_code == 503 and attempt == 0:
+                    time.sleep(2)
+                    continue
+                else:
+                    return f"❌ سرویس گوگل نیوز در دسترس نیست (کد {response.status_code}). لطفاً بعداً تلاش کنید."
+            except Exception as e:
+                if attempt == 1:
+                    raise
+                time.sleep(1)
         
-        response = requests.get(rss_url, timeout=10)
+        if response is None:
+            return "❌ خطا در دریافت اخبار از گوگل نیوز."
+        
         response.raise_for_status()
         
         root = ET.fromstring(response.content)
