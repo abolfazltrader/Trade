@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 waiting_for_symbol = {}
 
-# ========== لیست نمادهای معتبر برای اخبار (همان‌های قبل) ==========
+# ========== لیست نمادهای معتبر برای اخبار ==========
 VALID_CRYPTO_SYMBOLS = {
     "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
     "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
@@ -284,22 +285,24 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== تابع دریافت اخبار از گوگل نیوز (سریع و مطمئن) ==========
+# ========== تابع دریافت اخبار از گوگل نیوز (با کش) ==========
+@lru_cache(maxsize=100)
+def get_crypto_news_cached(symbol, limit=5):
+    """نسخه کش‌شده برای کاهش درخواست‌های تکراری"""
+    return get_crypto_news(symbol, limit)
+
 def get_crypto_news(symbol, limit=5):
     """
     دریافت اخبار مربوط به یک ارز از گوگل نیوز با استفاده از RSS
     بدون نیاز به هیچ کلید API
     """
     try:
-        # ساخت عبارت جستجو با نماد و کلمه کلیدی مرتبط
         query = f"{symbol} cryptocurrency news"
-        # استفاده از زبان انگلیسی برای نتایج بیشتر و دقیق‌تر
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         
-        response = requests.get(rss_url, timeout=8)
+        response = requests.get(rss_url, timeout=10)
         response.raise_for_status()
         
-        # Parse XML
         root = ET.fromstring(response.content)
         channel = root.find('channel')
         if channel is None:
@@ -309,21 +312,16 @@ def get_crypto_news(symbol, limit=5):
         if not items:
             return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
         
-        # استخراج اخبار
         news_text = f"📰 **اخبار مربوط به {symbol.upper()}** (Google News)\n\n"
         count = 0
         for item in items[:limit]:
             title_elem = item.find('title')
             title = title_elem.text if title_elem is not None else "بدون عنوان"
-            
             link_elem = item.find('link')
             link = link_elem.text if link_elem is not None else "#"
-            
-            # خلاصه خبر (در صورت وجود)
             desc_elem = item.find('description')
             description = desc_elem.text if desc_elem is not None else ""
             if description:
-                # حذف تگ‌های HTML
                 description = re.sub(r'<[^>]+>', '', description)
                 description = description[:200] + "..." if len(description) > 200 else description
             
@@ -333,11 +331,9 @@ def get_crypto_news(symbol, limit=5):
                 news_text += f"📌 {description}\n"
             news_text += f"🔗 [مشاهده کامل خبر]({link})\n\n"
         
-        # اگر خبری پیدا نشد
         if count == 0:
             return f"📭 هیچ خبری برای `{symbol}` در دسترس نیست."
         
-        # محدودیت طول پیام تلگرام
         if len(news_text) > 4096:
             news_text = news_text[:4000] + "\n\n... (ادامه اخبار در لینک‌ها)"
         
@@ -650,6 +646,7 @@ def handle_text_messages(message):
 
     # ===== اگر کاربر در حالت دریافت نماد اخبار است =====
     if waiting_for_symbol.get(user_id) == "news_symbol":
+        # حذف وضعیت انتظار (حتی اگر خطا رخ دهد)
         waiting_for_symbol.pop(user_id, None)
         
         # اعتبارسنجی نماد
@@ -660,20 +657,49 @@ def handle_text_messages(message):
                 f"❌ نماد `{text}` معتبر نیست.\n\nلطفاً یکی از نمادهای زیر را وارد کنید:\n`{symbols_list}`",
                 parse_mode='Markdown'
             )
+            # بازگشت به حالت انتظار برای تلاش مجدد
             waiting_for_symbol[user_id] = "news_symbol"
             return
         
-        processing_msg = bot.send_message(user_id, f"⏳ در حال دریافت اخبار مربوط به **{text}**... لطفاً صبر کنید.")
-        
-        news_text = get_crypto_news(text, limit=5)
-        
-        bot.edit_message_text(
-            news_text,
+        # پیام "در حال دریافت..."
+        processing_msg = bot.send_message(
             user_id,
-            processing_msg.message_id,
-            parse_mode='Markdown',
-            disable_web_page_preview=True
+            f"⏳ در حال دریافت اخبار مربوط به **{text}**... لطفاً صبر کنید.",
+            parse_mode='Markdown'
         )
+        
+        try:
+            # دریافت اخبار (با کش)
+            news_text = get_crypto_news_cached(text, limit=5)
+            
+            # ارسال پیام جدید (به‌جای ویرایش)
+            bot.send_message(
+                user_id,
+                news_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+            
+            # حذف پیام "در حال دریافت..."
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except Exception as e:
+                logger.warning(f"Could not delete processing message: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error in news processing: {e}")
+            # اگر خطایی رخ داد، پیام خطا را ارسال کن
+            bot.send_message(
+                user_id,
+                f"❌ خطا در دریافت اخبار برای `{text}`. لطفاً مجدداً تلاش کنید.\n\n{str(e)[:100]}",
+                parse_mode='Markdown'
+            )
+            # حذف پیام "در حال دریافت..."
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except:
+                pass
+        
         return
 
 # ---------- مسیرهای Webhook ----------
