@@ -5,7 +5,7 @@ import ccxt
 import sqlite3
 import time
 import re
-import xml.etree.ElementTree as ET  # جایگزین feedparser
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import telebot
@@ -20,7 +20,7 @@ if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set!")
 
 BOT_USERNAME = "Crypto_forex_2026_bot"
-BASE_URL = "https://trade-i4js.onrender.com"
+BASE_URL = "https://trade-i4js.onrender.com"  # آدرس رندر خود را جایگزین کنید
 
 ADMIN_IDS = [6542890217]
 
@@ -294,63 +294,263 @@ def get_crypto_price_by_symbol(symbol):
 
 # ========== توابع دریافت اخبار ==========
 
-# ---------- اخبار کریپتو (با fallback) ----------
+# ---------- اخبار کریپتو (کامل از کد اصلی شما) ----------
 @lru_cache(maxsize=100)
 def get_crypto_news_cached(symbol, limit=5):
     return get_crypto_news(symbol, limit)
 
 def get_crypto_news(symbol, limit=5):
-    # (کد قبلی بدون تغییر)
+    """
+    دریافت اخبار مربوط به یک ارز:
+    1. اول از Free Crypto News API (cryptocurrency.cv)
+    2. در صورت خطا، از CryptoPanic به عنوان Fallback
+    """
+    # ===== منبع اول: Free Crypto News API =====
     try:
         url = f"https://cryptocurrency.cv/api/news?ticker={symbol.lower()}&limit={limit}"
         response = requests.get(url, timeout=10)
+        
         if response.status_code != 200:
             logger.warning(f"API returned status {response.status_code} for {symbol}")
             if response.status_code in [429, 503, 500, 502, 504]:
                 return get_crypto_news_fallback(symbol, limit)
             return f"❌ خطا در دریافت اخبار برای `{symbol}` (کد {response.status_code})."
+        
         try:
             data = response.json()
-        except ValueError:
+        except ValueError as e:
+            logger.error(f"JSON decode error for {symbol}: {e}")
             return get_crypto_news_fallback(symbol, limit)
-        if not isinstance(data, dict) or 'articles' not in data:
+        
+        if isinstance(data, str):
+            logger.error(f"API returned string for {symbol}: {data[:200]}")
             return get_crypto_news_fallback(symbol, limit)
+        
+        if not isinstance(data, dict):
+            logger.error(f"API returned non-dict for {symbol}: {type(data)}")
+            return get_crypto_news_fallback(symbol, limit)
+        
+        if 'articles' not in data:
+            logger.error(f"No 'articles' in response for {symbol}")
+            return get_crypto_news_fallback(symbol, limit)
+        
         articles = data['articles']
-        if not isinstance(articles, list) or not articles:
+        if not isinstance(articles, list):
+            logger.error(f"'articles' is not a list for {symbol}: {type(articles)}")
+            return get_crypto_news_fallback(symbol, limit)
+        
+        if not articles:
             return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
 
-        positive_keywords = [...]
-        negative_keywords = [...]
-        # ... (بقیه کد تحلیل مانند قبل)
-        # برای اختصار، بخش تحلیل را همانند کد قبلی قرار دهید (من اینجا تکرار نمی‌کنم)
-        # اما باید همان منطق قبلی باشد.
-        # (از آنجا که کد طولانی می‌شود، فرض می‌کنیم بخش تحلیل را دارید)
+        # ===== کلمات کلیدی برای تحلیل سنتیمنت =====
+        positive_keywords = [
+            'surge', 'rally', 'gain', 'positive', 'bullish', 'approved', 'launch',
+            'partnership', 'adoption', 'breakthrough', 'record', 'high', 'upgrade',
+            'mainnet', 'integration', 'collaboration', 'investment', 'funding',
+            'milestone', 'growth', 'profit', 'success'
+        ]
+        negative_keywords = [
+            'drop', 'crash', 'decline', 'negative', 'bearish', 'reject', 'fraud',
+            'hack', 'ban', 'restriction', 'delay', 'scam', 'loss', 'warning',
+            'investigation', 'fine', 'penalty', 'lawsuit', 'risk', 'fall',
+            'sell-off', 'panic'
+        ]
+        
+        positive_news = []
+        negative_news = []
+        neutral_news = []
+        
+        for article in articles[:limit]:
+            if not isinstance(article, dict):
+                continue
+            title = article.get('title', '')
+            if not title:
+                continue
+            description = article.get('description', '')
+            combined_text = (title + ' ' + (description or '')).lower()
+            
+            pos_score = sum(1 for word in positive_keywords if word in combined_text)
+            neg_score = sum(1 for word in negative_keywords if word in combined_text)
+            
+            if pos_score > neg_score:
+                sentiment = 'positive'
+            elif neg_score > pos_score:
+                sentiment = 'negative'
+            else:
+                sentiment = 'neutral'
+            
+            source_name = 'منبع نامشخص'
+            if isinstance(article.get('source'), dict):
+                source_name = article['source'].get('name', 'منبع نامشخص')
+            
+            news_item = {
+                'title': title,
+                'link': article.get('url', '#'),
+                'source': source_name
+            }
+            
+            if sentiment == 'positive':
+                positive_news.append(news_item)
+            elif sentiment == 'negative':
+                negative_news.append(news_item)
+            else:
+                neutral_news.append(news_item)
+
+        pos_count = len(positive_news)
+        neg_count = len(negative_news)
+        neutral_count = len(neutral_news)
+        total = pos_count + neg_count + neutral_count
+        
+        if total == 0:
+            return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
+        
+        if pos_count > neg_count:
+            overall_sentiment = "🟢 **مثبت**"
+            trading_result = "✅ خرید (Long)"
+        elif neg_count > pos_count:
+            overall_sentiment = "🔴 **منفی**"
+            trading_result = "❌ فروش (Short)"
+        else:
+            overall_sentiment = "⚪ **خنثی**"
+            trading_result = "⏳ انتظار / بدون سیگنال روشن"
+        
+        if total >= 5:
+            confidence = "بالا"
+        elif total >= 3:
+            confidence = "متوسط"
+        else:
+            confidence = "پایین"
+        
+        text = f"📰 **تحلیل اخبار {symbol.upper()}**\n\n"
+        if positive_news:
+            text += "🟢 **اخبار مثبت:**\n"
+            for item in positive_news[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        if negative_news:
+            text += "🔴 **اخبار منفی:**\n"
+            for item in negative_news[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        if neutral_news:
+            text += "⚪ **اخبار خنثی:**\n"
+            for item in neutral_news[:2]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        text += f"📌 **سنتیمنت کلی بازار:** {overall_sentiment}\n"
+        text += f"💡 **نتیجه معاملاتی:** {trading_result}\n"
+        text += f"📊 **اطمینان:** {confidence} - {total} خبر تحلیل شد\n\n"
+        text += f"🔗 [مشاهده همه اخبار](https://cryptocurrency.cv/news?ticker={symbol.lower()})"
+        
+        if len(text) > 4096:
+            text = text[:4000] + "\n\n... (ادامه در لینک)"
+        return text
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error for {symbol}: {e}")
+        return get_crypto_news_fallback(symbol, limit)
     except Exception as e:
+        logger.error(f"Unexpected error for {symbol}: {e}")
         return get_crypto_news_fallback(symbol, limit)
 
 def get_crypto_news_fallback(symbol, limit=5):
-    # (همان کد قبلی)
+    """منبع جایگزین: CryptoPanic (رایگان، بدون کلید)"""
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
-        params = {'auth_token': '', 'currencies': symbol.lower(), 'kind': 'news', 'public': 'true', 'filter': 'hot'}
+        params = {
+            'auth_token': '',
+            'currencies': symbol.lower(),
+            'kind': 'news',
+            'public': 'true',
+            'filter': 'hot'
+        }
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
+        
         if not data.get('results'):
             return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
-        # ... (بقیه کد)
-        return "..." 
+        
+        news_items = []
+        for post in data['results'][:limit]:
+            title = post.get('title', 'بدون عنوان')
+            link = post.get('url', '#')
+            sentiment = 'neutral'
+            for tag in post.get('tags', []):
+                if tag.get('slug') in ['bullish', 'positive']:
+                    sentiment = 'positive'
+                    break
+                elif tag.get('slug') in ['bearish', 'negative']:
+                    sentiment = 'negative'
+                    break
+            news_items.append({
+                'title': title,
+                'link': link,
+                'sentiment': sentiment
+            })
+        
+        positive = [n for n in news_items if n['sentiment'] == 'positive']
+        negative = [n for n in news_items if n['sentiment'] == 'negative']
+        neutral = [n for n in news_items if n['sentiment'] == 'neutral']
+        
+        pos_count = len(positive)
+        neg_count = len(negative)
+        total = pos_count + neg_count + len(neutral)
+        
+        if total == 0:
+            return f"📭 هیچ خبری برای `{symbol}` یافت نشد."
+        
+        if pos_count > neg_count:
+            overall_sentiment = "🟢 **مثبت**"
+            trading_result = "✅ خرید (Long)"
+        elif neg_count > pos_count:
+            overall_sentiment = "🔴 **منفی**"
+            trading_result = "❌ فروش (Short)"
+        else:
+            overall_sentiment = "⚪ **خنثی**"
+            trading_result = "⏳ انتظار / بدون سیگنال روشن"
+        
+        if total >= 5:
+            confidence = "بالا"
+        elif total >= 3:
+            confidence = "متوسط"
+        else:
+            confidence = "پایین"
+        
+        text = f"📰 **تحلیل اخبار {symbol.upper()}** (CryptoPanic)\n\n"
+        if positive:
+            text += "🟢 **اخبار مثبت:**\n"
+            for item in positive[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        if negative:
+            text += "🔴 **اخبار منفی:**\n"
+            for item in negative[:3]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        if neutral:
+            text += "⚪ **اخبار خنثی:**\n"
+            for item in neutral[:2]:
+                text += f"• {item['title']}\n"
+            text += "\n"
+        text += f"📌 **سنتیمنت کلی بازار:** {overall_sentiment}\n"
+        text += f"💡 **نتیجه معاملاتی:** {trading_result}\n"
+        text += f"📊 **اطمینان:** {confidence} - {total} خبر تحلیل شد\n\n"
+        text += f"🔗 [مشاهده همه اخبار](https://cryptopanic.com/news/{symbol.lower()})"
+        
+        if len(text) > 4096:
+            text = text[:4000] + "\n\n... (ادامه در لینک)"
+        return text
+        
     except Exception as e:
-        return f"❌ خطا در دریافت اخبار برای `{symbol}`."
+        logger.error(f"Fallback error for {symbol}: {e}")
+        return f"❌ خطا در دریافت اخبار برای `{symbol}`. لطفاً بعداً تلاش کنید."
 
-# ---------- اخبار فارکس (بدون feedparser) ----------
+# ---------- اخبار فارکس (با استفاده از xml.etree.ElementTree) ----------
 @lru_cache(maxsize=100)
 def get_forex_news_cached(symbol, limit=5):
     return get_forex_news(symbol, limit)
 
 def get_forex_news(symbol, limit=5):
-    """
-    دریافت اخبار فارکس از Google News RSS با استفاده از xml.etree.ElementTree
-    """
     try:
         query = f"{symbol} forex news"
         encoded_query = quote(query)
@@ -360,11 +560,7 @@ def get_forex_news(symbol, limit=5):
         if response.status_code != 200:
             return f"❌ خطا در دریافت اخبار فارکس برای `{symbol}` (کد {response.status_code})."
         
-        # پردازش XML
         root = ET.fromstring(response.content)
-        # فضای نام RSS
-        ns = {'': 'http://www.w3.org/2005/Atom'}  # اما معمولاً بدون namespace است
-        # پیدا کردن آیتم‌ها
         items = root.findall('.//item')
         if not items:
             return f"📭 هیچ خبری برای `{symbol}` در فارکس یافت نشد."
@@ -429,7 +625,7 @@ def get_forex_news(symbol, limit=5):
         logger.error(f"Forex news error for {symbol}: {e}")
         return f"❌ خطا در دریافت اخبار فارکس برای `{symbol}`. لطفاً بعداً تلاش کنید."
 
-# ---------- دکمه‌های منو (بدون تغییر) ----------
+# ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_price = KeyboardButton("📊 قیمت لحظه‌ای")
@@ -460,7 +656,7 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
-# ---------- دستورات و هندلرها (بدون تغییر) ----------
+# ---------- دستورات و هندلرها ----------
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
