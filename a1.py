@@ -45,6 +45,16 @@ logger = logging.getLogger(__name__)
 waiting_for_symbol = {}
 waiting_for_signal = {}
 
+# ========== نگاشت تایم‌فریم‌ها ==========
+TIMEFRAME_MAP = {
+    '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
+    '1h': '1h', '4h': '4h', '1d': '1d'
+}
+TIMEFRAME_NAMES = {
+    '1m': '۱ دقیقه', '5m': '۵ دقیقه', '15m': '۱۵ دقیقه',
+    '30m': '۳۰ دقیقه', '1h': '۱ ساعت', '4h': '۴ ساعت', '1d': 'روزانه'
+}
+
 # ========== لیست نمادهای معتبر ==========
 VALID_CRYPTO_SYMBOLS = {
     "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
@@ -365,7 +375,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
                 'volume': np.array(volumes)
             }
             historical_cache[cache_key] = (data, datetime.now())
-            logger.info(f"Historical data fetched from {exchange.name} for {symbol}")
+            logger.info(f"Historical data fetched from {exchange.name} for {symbol} ({timeframe})")
             return data
         except Exception as e:
             logger.warning(f"Failed to fetch from {exchange.name}: {e}")
@@ -487,9 +497,9 @@ def determine_context(data):
     last = data['close'][-1]
     prev = data['close'][-2]
     if last > prev:
-        return "4H"
+        return "صعودی"
     elif last < prev:
-        return "4H"
+        return "نزولی"
     else:
         return "خنثی"
 
@@ -513,7 +523,7 @@ def calculate_rrr(data, signal):
         return 0
     return round(reward / risk, 2)
 
-def plot_chart(data, indicators, symbol, support, resistance):
+def plot_chart(data, indicators, symbol, support, resistance, timeframe):
     try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
@@ -554,17 +564,18 @@ def plot_chart(data, indicators, symbol, support, resistance):
         ax1.set_facecolor('#1a1a2e')
         ax1.grid(True, alpha=0.3, linestyle='dotted')
         ax1.legend(loc='upper left')
-        ax1.set_title(f'{symbol} - Daily Chart', color='white', fontsize=14)
+        tf_name = TIMEFRAME_NAMES.get(timeframe, timeframe)
+        ax1.set_title(f'{symbol} - {tf_name} Chart', color='white', fontsize=14)
         ax1.set_ylabel('Price (USDT)', color='white')
         ax1.tick_params(colors='white')
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
         
         ax2.bar(dates, data['volume'], color='#3498db', alpha=0.7)
         ax2.set_facecolor('#1a1a2e')
         ax2.grid(True, alpha=0.3, linestyle='dotted')
         ax2.set_ylabel('Volume', color='white')
         ax2.tick_params(colors='white')
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
         
         plt.xticks(rotation=0)
         plt.tight_layout()
@@ -578,16 +589,24 @@ def plot_chart(data, indicators, symbol, support, resistance):
         logger.error(f"Error plotting chart: {e}")
         return None
 
-def generate_technical_analysis(symbol):
+def generate_technical_analysis(symbol, timeframe='1d'):
     try:
         if not symbol.endswith('/USDT'):
             symbol_usdt = f"{symbol}/USDT"
         else:
             symbol_usdt = symbol
+        
+        # تنظیم تعداد کندل‌ها بر اساس تایم‌فریم
+        if timeframe in ['1m', '5m']:
+            limit = 100
+        elif timeframe in ['15m', '30m']:
+            limit = 150
+        else:
+            limit = 200
             
-        data = get_historical_data_multi(symbol_usdt, '1d', 200)
-        if data is None or data.get('close') is None or len(data['close']) < 50:
-            return None, None, "❌ داده‌های تاریخی کافی برای این ارز در دسترس نیست. لطفاً بعداً تلاش کنید."
+        data = get_historical_data_multi(symbol_usdt, timeframe, limit)
+        if data is None or data.get('close') is None or len(data['close']) < 30:
+            return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست. لطفاً تایم‌فریم دیگری انتخاب کنید."
         
         indicators = calculate_indicators(data)
         support, resistance = find_support_resistance(data)
@@ -625,7 +644,8 @@ def generate_technical_analysis(symbol):
             'status': status,
             'last_price': data['close'][-1],
             'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0,
-            'timeframe': 'روزانه (Daily)',
+            'timeframe': TIMEFRAME_NAMES.get(timeframe, timeframe),
+            'timeframe_code': timeframe,
             'atr': atr,
             'rsi': indicators['RSI'].iloc[-1] if not np.isnan(indicators['RSI'].iloc[-1]) else 0,
             'macd': indicators['MACD'].iloc[-1] if not np.isnan(indicators['MACD'].iloc[-1]) else 0,
@@ -634,7 +654,7 @@ def generate_technical_analysis(symbol):
         
         chart_img = None
         try:
-            chart_img = plot_chart(data, indicators, symbol, support, resistance)
+            chart_img = plot_chart(data, indicators, symbol, support, resistance, timeframe)
         except Exception as chart_error:
             logger.warning(f"Chart plotting failed: {chart_error}")
         
@@ -1240,7 +1260,7 @@ def analyze_step(message):
     )
     
     try:
-        analysis_data, chart_img, error = generate_technical_analysis(symbol)
+        analysis_data, chart_img, error = generate_technical_analysis(symbol, '1d')
         
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1291,7 +1311,7 @@ def analyze_step(message):
         except:
             pass
 
-# ---------- دکمه سیگنال معاملاتی ----------
+# ---------- دکمه سیگنال معاملاتی (به‌روزرسانی‌شده) ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
     user_id = message.chat.id
@@ -1302,15 +1322,21 @@ def handle_signal(message):
     waiting_for_signal[user_id] = True
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
+    tf_list = "\n".join([f"• `{k}` ({v})" for k, v in TIMEFRAME_NAMES.items()])
 
     help_text = (
         "📈 **سیگنال معاملاتی**\n\n"
-        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
-        "🪙 **ارزهای دیجیتال (تحلیل تکنیکال کامل):**\n"
+        "لطفاً **نماد** و **تایم‌فریم** مورد نظر را وارد کنید.\n\n"
+        "🪙 **ارزهای دیجیتال:**\n"
         f"`{crypto_list}`\n\n"
-        "💱 **جفت‌ارزهای فارکس (تحلیل بر اساس اخبار):**\n"
+        "💱 **جفت‌ارزهای فارکس:**\n"
         f"`{forex_list}`\n\n"
-        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "⏰ **تایم‌فریم‌های قابل انتخاب:**\n"
+        f"{tf_list}\n\n"
+        "📌 **نحوه ورود:**\n"
+        "`نماد تایم‌فریم`\n"
+        "مثال: `BTC 4h` یا `ETH 1h` یا `SOL 15m`\n\n"
+        "💡 در صورت وارد کردن فقط نماد (مثل `BTC`)، تایم‌فریم **روزانه (1d)** استفاده می‌شود.\n\n"
         "⏳ پردازش ممکن است ۱۰-۲۰ ثانیه طول بکشد."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
@@ -1349,8 +1375,8 @@ def handle_help(message):
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
         "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی\n"
-        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال و اخبار\n"
-        "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها\n"
+        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف\n"
+        "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها (روزانه)\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
         "پشتیبانی: @YourSupport"
@@ -1431,12 +1457,37 @@ def handle_text_messages(message):
     # ===== حالت سیگنال معاملاتی =====
     if waiting_for_signal.get(user_id):
         waiting_for_signal.pop(user_id, None)
-        if text not in ALL_VALID_SYMBOLS:
+        
+        # تجزیه ورودی: جداسازی نماد و تایم‌فریم
+        parts = text.split()
+        symbol = parts[0] if parts else ""
+        timeframe = '1d'  # پیش‌فرض
+        
+        # اگر بیش از یک بخش وجود دارد، بخش دوم را به‌عنوان تایم‌فریم در نظر بگیر
+        if len(parts) > 1:
+            tf_input = parts[1].lower()
+            if tf_input in TIMEFRAME_MAP:
+                timeframe = TIMEFRAME_MAP[tf_input]
+            else:
+                # اگر تایم‌فریم نامعتبر بود، پیام خطا بده
+                tf_list = ", ".join([f"`{k}`" for k in TIMEFRAME_MAP.keys()])
+                bot.send_message(
+                    user_id,
+                    f"❌ تایم‌فریم `{tf_input}` معتبر نیست.\n\n"
+                    f"⏰ تایم‌فریم‌های معتبر:\n{tf_list}\n\n"
+                    f"📌 مثال: `BTC 4h` یا `ETH 1h`",
+                    parse_mode='Markdown'
+                )
+                waiting_for_signal[user_id] = True
+                return
+        
+        # اعتبارسنجی نماد
+        if symbol not in ALL_VALID_SYMBOLS:
             crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
             forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
             bot.send_message(
                 user_id,
-                f"❌ نماد `{text}` معتبر نیست.\n\n"
+                f"❌ نماد `{symbol}` معتبر نیست.\n\n"
                 f"🪙 ارزهای دیجیتال:\n`{crypto_list}`\n\n"
                 f"💱 جفت‌ارزهای فارکس:\n`{forex_list}`",
                 parse_mode='Markdown'
@@ -1446,19 +1497,19 @@ def handle_text_messages(message):
 
         processing_msg = bot.send_message(
             user_id,
-            f"⏳ در حال تولید سیگنال برای **{text}**... لطفاً صبر کنید.",
+            f"⏳ در حال تولید سیگنال برای **{symbol}** در تایم‌فریم **{TIMEFRAME_NAMES.get(timeframe, timeframe)}**... لطفاً صبر کنید.",
             parse_mode='Markdown'
         )
 
         try:
-            if text in VALID_CRYPTO_SYMBOLS:
-                analysis_data, chart_img, error = generate_technical_analysis(text)
+            if symbol in VALID_CRYPTO_SYMBOLS:
+                analysis_data, chart_img, error = generate_technical_analysis(symbol, timeframe)
                 if error:
                     bot.send_message(user_id, error, parse_mode='Markdown')
                 elif not analysis_data:
-                    bot.send_message(user_id, "❌ سیگنالی برای این ارز در دسترس نیست.", parse_mode='Markdown')
+                    bot.send_message(user_id, "❌ سیگنالی برای این ارز در تایم‌فریم انتخاب‌شده در دسترس نیست.", parse_mode='Markdown')
                 else:
-                    signal_text = generate_crypto_signal(text, analysis_data)
+                    signal_text = generate_crypto_signal(symbol, analysis_data)
                     if chart_img:
                         bot.send_photo(
                             user_id,
@@ -1469,7 +1520,8 @@ def handle_text_messages(message):
                     else:
                         bot.send_message(user_id, signal_text, parse_mode='Markdown')
             else:
-                signal_text = generate_forex_signal(text)
+                # فارکس – تایم‌فریم قابل تغییر نیست، فقط اخبار
+                signal_text = generate_forex_signal(symbol)
                 bot.send_message(user_id, signal_text, parse_mode='Markdown', disable_web_page_preview=True)
 
             try:
@@ -1481,7 +1533,7 @@ def handle_text_messages(message):
             logger.error(f"Error in signal processing: {e}")
             bot.send_message(
                 user_id,
-                f"❌ خطا در تولید سیگنال برای `{text}`. لطفاً مجدداً تلاش کنید.",
+                f"❌ خطا در تولید سیگنال برای `{symbol}`. لطفاً مجدداً تلاش کنید.",
                 parse_mode='Markdown'
             )
             try:
