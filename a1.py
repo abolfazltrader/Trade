@@ -15,13 +15,23 @@ from functools import lru_cache
 from urllib.parse import quote
 from deep_translator import GoogleTranslator
 
+# ========== کتابخانه‌های جدید برای تحلیل تکنیکال ==========
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+from ta.trend import ADXIndicator
+from ta.volume import MFIIndicator
+from ta.trend import EMAIndicator
+from io import BytesIO
+
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set!")
 
 BOT_USERNAME = "Crypto_forex_2026_bot"
-BASE_URL = "https://trade-i4js.onrender.com"  # آدرس رندر خود را جایگزین کنید
+BASE_URL = "https://trade-i4js.onrender.com"
 
 ADMIN_IDS = [6542890217]
 
@@ -314,11 +324,309 @@ def translate_to_persian(text):
         logger.error(f"Translation error: {e}")
         return text
 
-# ========== توابع دریافت اخبار ==========
+# ========== توابع تحلیل تکنیکال و رسم چارت ==========
 
-# ----- توابع کمکی برای تحلیل احساسات و ساخت خروجی -----
+def get_historical_data(symbol="BTC/USDT", timeframe='1d', limit=365):
+    """دریافت داده‌های تاریخی از Binance"""
+    try:
+        exchange = ccxt.binance()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching historical data: {e}")
+        return None
+
+def calculate_indicators(df):
+    """محاسبه اندیکاتورهای تکنیکال"""
+    # EMA 100 و 200
+    df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
+    df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
+    
+    # ADX 14
+    adx = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
+    df['ADX'] = adx.adx()
+    df['DI_plus'] = adx.adx_pos()
+    df['DI_minus'] = adx.adx_neg()
+    
+    # MFI 14
+    df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
+    
+    return df
+
+def find_support_resistance(df, lookback=50):
+    """پیدا کردن سطوح حمایت و مقاومت کلیدی"""
+    # پیدا کردن قله‌ها و دره‌ها
+    recent_df = df.tail(lookback)
+    highs = recent_df['high'].values
+    lows = recent_df['low'].values
+    
+    # حمایت نزدیک‌ترین سطح پایین
+    support = round(recent_df['low'].min(), 2)
+    # مقاومت نزدیک‌ترین سطح بالا
+    resistance = round(recent_df['high'].max(), 2)
+    
+    return support, resistance
+
+def generate_trading_signal(df):
+    """تولید سیگنال معاملاتی بر اساس اندیکاتورها"""
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # شرایط لانگ
+    long_conditions = 0
+    if last['close'] > last['EMA_200']:
+        long_conditions += 1
+    if last['close'] > last['EMA_100']:
+        long_conditions += 1
+    if last['ADX'] > 25:
+        long_conditions += 1
+    if last['DI_plus'] > last['DI_minus']:
+        long_conditions += 1
+    if last['MFI'] > 50:
+        long_conditions += 1
+    
+    # شرایط شورت
+    short_conditions = 0
+    if last['close'] < last['EMA_200']:
+        short_conditions += 1
+    if last['close'] < last['EMA_100']:
+        short_conditions += 1
+    if last['ADX'] > 25:
+        short_conditions += 1
+    if last['DI_minus'] > last['DI_plus']:
+        short_conditions += 1
+    if last['MFI'] < 50:
+        short_conditions += 1
+    
+    if long_conditions >= 3 and long_conditions > short_conditions:
+        return 'long', 'صعودی', round(7 + (long_conditions / 5), 1)
+    elif short_conditions >= 3 and short_conditions > long_conditions:
+        return 'short', 'نزولی', round(7 + (short_conditions / 5), 1)
+    else:
+        return 'neutral', 'خنثی', round(5 + (max(long_conditions, short_conditions) / 5), 1)
+
+def determine_context(df):
+    """تعیین زمینه روزانه (ساعتی/روزانه)"""
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    if last['close'] > prev['close']:
+        trend = "صعودی"
+    elif last['close'] < prev['close']:
+        trend = "نزولی"
+    else:
+        trend = "خنثی"
+    
+    # بررسی بازار 4 ساعته
+    return "4H" if trend != "خنثی" else "خنثی"
+
+def calculate_rrr(df, signal):
+    """محاسبه نسبت ریسک به ریوارد (R:R)"""
+    last = df.iloc[-1]
+    recent_high = df['high'].tail(20).max()
+    recent_low = df['low'].tail(20).min()
+    
+    if signal == 'long':
+        entry = last['close']
+        stop_loss = recent_low
+        take_profit = recent_high
+    elif signal == 'short':
+        entry = last['close']
+        stop_loss = recent_high
+        take_profit = recent_low
+    else:
+        return 0
+    
+    risk = abs(entry - stop_loss)
+    reward = abs(take_profit - entry)
+    
+    if risk == 0:
+        return 0
+    
+    rrr = reward / risk
+    return round(rrr, 2)
+
+def plot_chart(df, symbol, support, resistance):
+    """رسم چارت با اندیکاتورها و ذخیره به عنوان تصویر"""
+    try:
+        # تنظیمات استایل
+        style = mpf.make_mpf_style(
+            base_mpf_style='charles',
+            marketcolors=mpf.make_marketcolors(
+                up='#2ecc71',
+                down='#e74c3c',
+                edge='#95a5a6',
+                wick='#bdc3c7',
+                volume='in',
+                volume_linestyle='solid'
+            ),
+            gridstyle='dotted',
+            y_on_right=True,
+            facecolor='#1a1a2e',
+            edgecolor='#2c3e50'
+        )
+        
+        # اضافه کردن اندیکاتورها
+        apds = [
+            mpf.make_addplot(df['EMA_100'], color='#f39c12', width=1, linestyle='--', label='EMA 100'),
+            mpf.make_addplot(df['EMA_200'], color='#9b59b6', width=1, linestyle='--', label='EMA 200'),
+        ]
+        
+        # ساخت چارت
+        fig, axes = mpf.plot(
+            df.tail(150),
+            type='candle',
+            style=style,
+            volume=True,
+            addplot=apds,
+            figsize=(16, 10),
+            returnfig=True,
+            xrotation=0,
+            datetime_format='%d %b',
+            warn_too_much_data=1000,
+            title=f'\n{str(symbol)} - Daily Chart with EMA(100), EMA(200), ADX(14), MFI(14)',
+            ylabel='Price (USDT)',
+            ylabel_lower='Volume',
+            panel_ratios=(3, 1)
+        )
+        
+        # اضافه کردن سطوح حمایت و مقاومت
+        ax = axes[0]
+        ax.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support}')
+        ax.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance}')
+        
+        # اضافه کردن متن اطلاعات
+        last_price = df.iloc[-1]['close']
+        ax.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax.transAxes,
+                fontsize=12, color='white', verticalalignment='top', bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
+        
+        # ذخیره تصویر در حافظه
+        img_data = BytesIO()
+        plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight')
+        img_data.seek(0)
+        plt.close()
+        
+        return img_data
+        
+    except Exception as e:
+        logger.error(f"Error plotting chart: {e}")
+        return None
+
+def generate_technical_analysis(symbol):
+    """تولید تحلیل کامل تکنیکال برای یک نماد"""
+    try:
+        # دریافت داده‌های تاریخی
+        df = get_historical_data(f"{symbol}/USDT", '1d', 365)
+        if df is None or df.empty:
+            return None, None, "❌ داده‌های تاریخی در دسترس نیست."
+        
+        # محاسبه اندیکاتورها
+        df = calculate_indicators(df)
+        
+        # پیدا کردن حمایت و مقاومت
+        support, resistance = find_support_resistance(df)
+        
+        # تولید سیگنال
+        signal_type, trend, score = generate_trading_signal(df)
+        
+        # تعیین زمینه
+        context = determine_context(df)
+        
+        # محاسبه R:R
+        rrr = calculate_rrr(df, signal_type)
+        
+        # تعیین سطح ریسک
+        if score >= 8:
+            risk_level = "پایین"
+        elif score >= 6:
+            risk_level = "متوسط"
+        else:
+            risk_level = "بالا"
+        
+        # تعیین وضعیت اجرا
+        if score >= 7 and rrr > 2:
+            status = "✅ مناسب برای ورود"
+        elif score >= 5 and rrr > 1.5:
+            status = "⏳ منتظر تایید"
+        else:
+            status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
+        
+        # ترجمه signal_type به فارسی
+        signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
+        signal_persian = signal_map.get(signal_type, 'نامشخص')
+        
+        # ترجمه trend
+        trend_map = {'صعودی': 'صعودی', 'نزولی': 'نزولی', 'خنثی': 'خنثی'}
+        
+        # آماده‌سازی داده‌های تحلیل
+        analysis_data = {
+            'symbol': symbol,
+            'context': context,
+            'trend': trend,
+            'support': support,
+            'resistance': resistance,
+            'signal': signal_persian,
+            'score': score,
+            'rrr': rrr,
+            'risk': risk_level,
+            'status': status,
+            'last_price': df.iloc[-1]['close'],
+            'change_24h': ((df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close']) * 100
+        }
+        
+        # رسم چارت
+        chart_img = plot_chart(df, symbol, support, resistance)
+        
+        return analysis_data, chart_img, None
+        
+    except Exception as e:
+        logger.error(f"Error in technical analysis: {e}")
+        return None, None, f"❌ خطا در تحلیل تکنیکال: {str(e)}"
+
+def format_analysis_message(data):
+    """قالب‌بندی پیام تحلیل برای ارسال به کاربر"""
+    if not data:
+        return "❌ اطلاعات کافی برای تحلیل وجود ندارد."
+    
+    msg = f"📊 **تحلیل تکنیکال {data['symbol']}**\n\n"
+    msg += f"### 1. خلاصه کلی\n"
+    msg += f"- **زمینه روزانه:** {data['context']}\n"
+    msg += f"- **روند اصلی:** {data['trend']}\n"
+    msg += f"- **حمایت کلیدی:** {data['support']:,.2f}\n"
+    msg += f"- **مقاومت کلیدی:** {data['resistance']:,.2f}\n"
+    msg += f"- **نوع سیگنال:** {data['signal']}\n"
+    msg += f"- **امتیاز کیفیت ستاپ:** {data['score']}\n"
+    msg += f"- **کیفیت رویداد (R:R):** {data['rrr']}\n"
+    msg += f"- **سطح ریسک (حد ضرر):** {data['risk']}\n"
+    msg += f"- **وضعیت اجرا:** {data['status']}\n\n"
+    
+    # بخش تحلیل تکمیلی
+    if data['signal'] == 'لانگ':
+        msg += f"**تحلیل:**\n"
+        msg += f"قیمت {data['symbol']} با شکست مقاومت {data['resistance']:,.2f} وارد فاز صعودی شده است. "
+        msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
+        msg += f"پتانسیل رشد تا سطح {data['resistance'] + (data['resistance'] - data['support']):,.2f} وجود دارد. "
+        msg += f"حد ضرر در صورت نزول قیمت به زیر {data['support']:,.2f} توصیه می‌شود.\n\n"
+    elif data['signal'] == 'شورت':
+        msg += f"**تحلیل:**\n"
+        msg += f"قیمت {data['symbol']} با شکست حمایت {data['support']:,.2f} وارد فاز نزولی شده است. "
+        msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
+        msg += f"پتانسیل کاهش تا سطح {data['support'] - (data['resistance'] - data['support']):,.2f} وجود دارد. "
+        msg += f"حد ضرر در صورت صعود قیمت به بالای {data['resistance']:,.2f} توصیه می‌شود.\n\n"
+    else:
+        msg += f"**تحلیل:**\n"
+        msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
+    
+    msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
+    
+    return msg
+
+# ========== توابع اخبار (قبلی) ==========
+# (همان توابع قبلی برای اخبار)
 def analyze_sentiment_detailed(text):
-    """تحلیل عمیق‌تر احساسات با کلمات کلیدی گسترده (ورودی باید انگلیسی باشد)"""
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
         "record", "high", "upgrade", "profit", "success", "breakthrough", "jump", "soar", "climb",
@@ -343,52 +651,39 @@ def analyze_sentiment_detailed(text):
         return 'neutral'
 
 def build_detailed_news_message(symbol, all_news_items, source_names):
-    """
-    ساخت پیام نهایی با ساختار مشابه نمونه:
-    - دسته‌بندی اخبار مثبت، منفی
-    - تحلیل کلی
-    - سنتیمنت بازار
-    - نتیجه معاملاتی
-    - اطمینان
-    """
     if not all_news_items:
         return f"❌ هیچ خبری برای `{symbol}` از منابع {', '.join(source_names)} یافت نشد."
-
-    # دسته‌بندی بر اساس sentiment
+    
     positive = [n for n in all_news_items if n['sentiment'] == 'positive']
     negative = [n for n in all_news_items if n['sentiment'] == 'negative']
     neutral = [n for n in all_news_items if n['sentiment'] == 'neutral']
-
-    # اگر بخش مثبت یا منفی خالی بود، از اخبار خنثی برای پر کردن استفاده کن
+    
     if not positive and neutral:
-        positive = neutral[:2]  # دو خبر خنثی را به عنوان مثبت نمایش بده
+        positive = neutral[:2]
     if not negative and neutral:
-        negative = neutral[:2]  # دو خبر خنثی را به عنوان منفی نمایش بده
-
+        negative = neutral[:2]
+    
     pos_count = len(positive)
     neg_count = len(negative)
     total = pos_count + neg_count + len(neutral)
-
+    
     if total == 0:
         return f"📭 هیچ خبر مرتبطی برای `{symbol}` پیدا نشد."
-
-    # ---------- ساخت بخش اخبار مثبت ----------
+    
     text = f"✅🗞 **اخبار مثبت ({pos_count} خبر):**\n"
     if positive:
         for item in positive[:5]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
-
-    # ---------- بخش اخبار منفی ----------
+    
     text += f"\n❌🗞 **اخبار منفی ({neg_count} خبر):**\n"
     if negative:
         for item in negative[:3]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
-
-    # ---------- تحلیل ----------
+    
     text += "\n📝 **تحلیل:**\n"
     if pos_count > neg_count:
         analysis = f"- اخبار مثبت به طور قابل توجهی بر اخبار منفی غلبه دارند.\n"
@@ -409,14 +704,13 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     else:
         analysis = f"- تعداد اخبار مثبت و منفی برابر است.\n"
         analysis += f"- بازار در حالت **خنثی** و انتظار برای محرک جدید قرار دارد.\n"
-
+    
     if neutral:
         analysis += f"- {len(neutral)} خبر خنثی نیز وجود دارند که نشان‌دهنده ابهام در بازار است.\n"
-
+    
     analysis += f"- اخبار از منابع {', '.join(source_names)} جمع‌آوری شده‌اند.\n"
     text += analysis
-
-    # ---------- سنتیمنت بازار ----------
+    
     if pos_count > neg_count:
         sentiment = "🐂 **صعودی**"
         trade_result = "✅ خرید محتاطانه — با توجه به سیگنال‌های صعودی قوی و اخبار مثبت متعدد."
@@ -429,35 +723,26 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         sentiment = "⚪ **خنثی**"
         trade_result = "⏳ انتظار — بدون سیگنال واضح، منتظر محرک جدید باشید."
         overall = "⚪ خنثی"
-
+    
     if total >= 6:
         confidence = "بالا — اخبار متعدد و هم‌جهت، با پوشش رسانه‌ای گسترده."
     elif total >= 4:
         confidence = "متوسط — تعداد اخبار کافی برای تصمیم‌گیری وجود دارد."
     else:
         confidence = "پایین — تعداد اخبار محدود است، با احتیاط تصمیم بگیرید."
-
+    
     text += f"\n🎯 **سنتیمنت بازار:** {sentiment}\n"
     text += f"📊 **تاثیر کلی اخبار:** {overall}\n"
     text += f"💡 **نتیجه معاملاتی:** {trade_result}\n"
     text += f"🔎 **اطمینان:** {confidence}\n"
     text += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | ربات تحلیلگر اخبار"
-
+    
     return text
 
-# ----- منابع دریافت اخبار (با اصلاح قطعی) -----
-
-# 1. CryptoPanic (فقط کریپتو)
 def fetch_cryptopanic(symbol, limit=8):
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
-        params = {
-            'auth_token': '',
-            'currencies': symbol.lower(),
-            'kind': 'news',
-            'public': 'true',
-            'filter': 'hot'
-        }
+        params = {'auth_token': '', 'currencies': symbol.lower(), 'kind': 'news', 'public': 'true', 'filter': 'hot'}
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, params=params, headers=headers, timeout=10)
         data = response.json()
@@ -468,8 +753,6 @@ def fetch_cryptopanic(symbol, limit=8):
             title_en = post.get('title', 'بدون عنوان')
             title_fa = translate_to_persian(title_en)
             link = post.get('url', '#')
-            
-            # تشخیص احساسات - اولویت با تگ‌ها
             sentiment = 'neutral'
             for tag in post.get('tags', []):
                 if tag.get('slug') in ['bullish', 'positive']:
@@ -478,23 +761,14 @@ def fetch_cryptopanic(symbol, limit=8):
                 elif tag.get('slug') in ['bearish', 'negative']:
                     sentiment = 'negative'
                     break
-            
-            # اگر تگ نداشت، تحلیل روی متن انگلیسی
             if sentiment == 'neutral':
                 sentiment = analyze_sentiment_detailed(title_en)
-            
-            news_items.append({
-                'title': title_fa,
-                'link': link,
-                'sentiment': sentiment,
-                'source': 'CryptoPanic'
-            })
+            news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'CryptoPanic'})
         return news_items
     except Exception as e:
         logger.error(f"CryptoPanic error for {symbol}: {e}")
         return None
 
-# 2. Bing News RSS
 def fetch_bing_news(symbol, limit=8, market='crypto'):
     try:
         if market == 'crypto':
@@ -519,18 +793,12 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
-            news_items.append({
-                'title': title_fa,
-                'link': link,
-                'sentiment': sentiment,
-                'source': 'Bing News'
-            })
+            news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Bing News'})
         return news_items
     except Exception as e:
         logger.error(f"Bing News error for {symbol}: {e}")
         return None
 
-# 3. Google News RSS
 def fetch_google_news(symbol, limit=8, market='crypto'):
     try:
         if market == 'crypto':
@@ -555,18 +823,12 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
-            news_items.append({
-                'title': title_fa,
-                'link': link,
-                'sentiment': sentiment,
-                'source': 'Google News'
-            })
+            news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Google News'})
         return news_items
     except Exception as e:
         logger.error(f"Google News error for {symbol}: {e}")
         return None
 
-# 4. Investing.com RSS (فقط فارکس)
 def fetch_investing_news(symbol, limit=8):
     try:
         rss_url = "https://www.investing.com/rss/news_forex.rss"
@@ -583,18 +845,12 @@ def fetch_investing_news(symbol, limit=8):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
-            # فیلتر بر اساس نماد
             if symbol.upper() not in title_en.upper():
                 continue
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
-            news_items.append({
-                'title': title_fa,
-                'link': link,
-                'sentiment': sentiment,
-                'source': 'Investing.com'
-            })
+            news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Investing.com'})
             if len(news_items) >= limit:
                 break
         return news_items if news_items else None
@@ -602,11 +858,9 @@ def fetch_investing_news(symbol, limit=8):
         logger.error(f"Investing.com error for {symbol}: {e}")
         return None
 
-# ----- تابع اصلی دریافت اخبار کریپتو (با چند منبع) -----
 def get_crypto_news(symbol, limit=8):
     all_news = []
     sources_used = []
-
     try:
         items = fetch_cryptopanic(symbol, limit)
         if items:
@@ -614,7 +868,6 @@ def get_crypto_news(symbol, limit=8):
             sources_used.append('CryptoPanic')
     except Exception as e:
         logger.warning(f"CryptoPanic failed: {e}")
-
     try:
         items = fetch_bing_news(symbol, limit, 'crypto')
         if items:
@@ -622,7 +875,6 @@ def get_crypto_news(symbol, limit=8):
             sources_used.append('Bing News')
     except Exception as e:
         logger.warning(f"Bing News failed: {e}")
-
     try:
         items = fetch_google_news(symbol, limit, 'crypto')
         if items:
@@ -630,25 +882,19 @@ def get_crypto_news(symbol, limit=8):
             sources_used.append('Google News')
     except Exception as e:
         logger.warning(f"Google News failed: {e}")
-
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
-
-    # حذف تکراری‌ها (بر اساس عنوان فارسی)
     seen_titles = set()
     unique_news = []
     for item in all_news:
         if item['title'] not in seen_titles:
             seen_titles.add(item['title'])
             unique_news.append(item)
-
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
-# ----- تابع اصلی دریافت اخبار فارکس (با چند منبع) -----
 def get_forex_news(symbol, limit=8):
     all_news = []
     sources_used = []
-
     try:
         items = fetch_investing_news(symbol, limit)
         if items:
@@ -656,7 +902,6 @@ def get_forex_news(symbol, limit=8):
             sources_used.append('Investing.com')
     except Exception as e:
         logger.warning(f"Investing.com failed: {e}")
-
     try:
         items = fetch_bing_news(symbol, limit, 'forex')
         if items:
@@ -664,7 +909,6 @@ def get_forex_news(symbol, limit=8):
             sources_used.append('Bing News')
     except Exception as e:
         logger.warning(f"Bing News failed: {e}")
-
     try:
         items = fetch_google_news(symbol, limit, 'forex')
         if items:
@@ -672,20 +916,16 @@ def get_forex_news(symbol, limit=8):
             sources_used.append('Google News')
     except Exception as e:
         logger.warning(f"Google News failed: {e}")
-
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
-
     seen_titles = set()
     unique_news = []
     for item in all_news:
         if item['title'] not in seen_titles:
             seen_titles.add(item['title'])
             unique_news.append(item)
-
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
-# ----- کش برای اخبار (زمان اعتبار ۵ دقیقه) -----
 news_cache = {}
 def get_cached_news(symbol, limit=8, is_crypto=True):
     cache_key = f"{'crypto' if is_crypto else 'forex'}_{symbol}_{limit}"
@@ -773,6 +1013,7 @@ def stats_command(message):
     total_users = c.fetchone()[0]
     bot.send_message(user_id, f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}", parse_mode='Markdown')
 
+# ---------- دکمه قیمت لحظه‌ای ----------
 @bot.message_handler(func=lambda msg: msg.text == "📊 قیمت لحظه‌ای")
 def handle_price(message):
     user_id = message.chat.id
@@ -781,6 +1022,7 @@ def handle_price(message):
         return
     bot.send_message(user_id, "📊 لطفاً یک گزینه را انتخاب کنید:", reply_markup=price_menu_keyboard())
 
+# ---------- دکمه اخبار ----------
 @bot.message_handler(func=lambda msg: msg.text == "📰 اخبار امروز و هفته")
 def handle_news(message):
     user_id = message.chat.id
@@ -808,67 +1050,120 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-@bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
-def handle_signal(message):
-    user_id = message.chat.id
-    if is_user_expired(user_id):
-        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
-        return
-    bot.send_message(user_id, "📈 **سیگنال لحظه‌ای**\n\nفعلاً سیگنالی موجود نیست.\nبه‌زودی اضافه می‌شود.", parse_mode='Markdown')
-
+# ---------- دکمه تحلیل ارز دلخواه (نسخه پیشرفته با چارت) ----------
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    bot.send_message(user_id, "🔍 لطفاً نام ارز مورد نظر را وارد کنید (مثلاً BTC یا EURUSD):")
+    
+    crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
+    forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
+    
+    help_text = (
+        "🔍 **تحلیل تکنیکال پیشرفته**\n\n"
+        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
+        "🪙 **ارزهای دیجیتال:**\n"
+        f"`{crypto_list}`\n\n"
+        "💱 **جفت‌ارزهای فارکس:**\n"
+        f"`{forex_list}`\n\n"
+        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "📊 تحلیل شامل:\n"
+        "• چارت قیمت با اندیکاتورهای EMA, ADX, MFI\n"
+        "• سطوح حمایت و مقاومت\n"
+        "• سیگنال معاملاتی (لانگ/شورت)\n"
+        "• نسبت ریسک به ریوارد (R:R)\n"
+        "• سطح ریسک و وضعیت اجرا\n\n"
+        "⏳ تحلیل ممکن است ۱۰-۱۵ ثانیه زمان ببرد."
+    )
+    bot.send_message(user_id, help_text, parse_mode='Markdown')
     bot.register_next_step_handler(message, analyze_step)
 
 def analyze_step(message):
     user_id = message.chat.id
     symbol = message.text.strip().upper()
+    
     if not symbol:
-        bot.send_message(user_id, "❌ نام ارز معتبر وارد کنید.")
+        bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید.")
         return
-    if symbol == "EURUSD":
-        symbol = "EUR/USDT"
-    elif symbol == "GBPUSD":
-        symbol = "GBP/USDT"
-    elif symbol == "XAUUSD":
-        symbol = "XAU/USDT"
-    if "/" in symbol:
-        info = get_crypto_price(symbol)
-        if info:
-            text = f"📊 **تحلیل {symbol}**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                text += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}"
-            text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
+    
+    # اعتبارسنجی (فقط برای کریپتو چون چارت فقط برای کریپتو رسم می‌شود)
+    if symbol not in VALID_CRYPTO_SYMBOLS:
+        bot.send_message(
+            user_id,
+            f"❌ نماد `{symbol}` برای تحلیل تکنیکال پشتیبانی نمی‌شود.\n\n"
+            f"🪙 لطفاً یکی از ارزهای دیجیتال زیر را وارد کنید:\n"
+            f"`{', '.join(sorted(VALID_CRYPTO_SYMBOLS))}`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    processing_msg = bot.send_message(
+        user_id,
+        f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۲۰ ثانیه طول بکشد.",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        # تولید تحلیل تکنیکال
+        analysis_data, chart_img, error = generate_technical_analysis(symbol)
+        
+        if error:
+            bot.send_message(user_id, error, parse_mode='Markdown')
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except:
+                pass
+            return
+        
+        if not analysis_data:
+            bot.send_message(user_id, "❌ تحلیل تکنیکال برای این ارز در دسترس نیست.", parse_mode='Markdown')
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except:
+                pass
+            return
+        
+        # قالب‌بندی پیام تحلیل
+        analysis_msg = format_analysis_message(analysis_data)
+        
+        # ارسال چارت + تحلیل
+        if chart_img:
+            bot.send_photo(
+                user_id,
+                chart_img,
+                caption=analysis_msg,
+                parse_mode='Markdown'
+            )
         else:
-            text = "❌ ارز مورد نظر یافت نشد."
-    else:
-        if len(symbol) == 6:
-            pair = f"{symbol[:3]}/{symbol[3:]}"
-            if pair in ["EUR/USD", "GBP/USD"]:
-                pair = pair.replace("/USD", "/USDT")
-            info = get_crypto_price(pair)
-            if info:
-                text = f"📊 **تحلیل {pair}**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    text += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}"
-                text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                text = "❌ جفت‌ارز یافت نشد."
-        else:
-            info = get_crypto_price_by_symbol(symbol)
-            if info:
-                text = f"📊 **تحلیل {symbol.upper()}**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    text += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}"
-                text += f"\n📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                text = "❌ ارز یا جفت‌ارز یافت نشد."
-    bot.send_message(user_id, text)
+            bot.send_message(user_id, analysis_msg, parse_mode='Markdown')
+        
+        try:
+            bot.delete_message(user_id, processing_msg.message_id)
+        except:
+            pass
+            
+    except Exception as e:
+        logger.error(f"Error in analyze_step: {e}")
+        bot.send_message(
+            user_id,
+            f"❌ خطا در تحلیل `{symbol}`. لطفاً مجدداً تلاش کنید.\n\n{str(e)}",
+            parse_mode='Markdown'
+        )
+        try:
+            bot.delete_message(user_id, processing_msg.message_id)
+        except:
+            pass
+
+# ---------- سایر دکمه‌ها ----------
+@bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
+def handle_signal(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    bot.send_message(user_id, "📈 **سیگنال لحظه‌ای**\n\nبرای دریافت سیگنال، از دکمه **🔍 تحلیل ارز دلخواه** استفاده کنید.", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "🎯 پیشنهاد خرید")
 def handle_suggest(message):
@@ -876,7 +1171,7 @@ def handle_suggest(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    suggest_text = "🎯 **پیشنهاد خرید**\n\nبر اساس تحلیل‌های فعلی، ارزهای زیر پتانسیل رشد دارند:\n• BTC\n• ETH\n• XAU"
+    suggest_text = "🎯 **پیشنهاد خرید**\n\nبر اساس تحلیل‌های فعلی، ارزهای زیر پتانسیل رشد دارند:\n• BTC\n• ETH\n• SOL"
     bot.send_message(user_id, suggest_text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "👤 پنل کاربری")
@@ -903,14 +1198,15 @@ def handle_help(message):
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
         "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی\n"
-        "📈 سیگنال: سیگنال‌های خرید و فروش (به‌زودی)\n"
-        "🔍 تحلیل: تحلیل تکنیکال و بنیادی ارز دلخواه\n"
+        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال\n"
+        "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
         "پشتیبانی: @YourSupport"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
+# ---------- هندلرهای کالبک قیمت ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
 def callback_price(call):
     user_id = call.from_user.id
