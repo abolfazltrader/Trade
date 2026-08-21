@@ -410,7 +410,7 @@ def fetch_bing_news(symbol, limit=5, market='crypto'):
         if market == 'crypto':
             query = f"{symbol} cryptocurrency news"
         else:
-            query = f"{symbol} forex news"
+            query = f"forex {symbol}"  # عبارت گسترده‌تر برای فارکس
         encoded_query = quote(query)
         rss_url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -466,6 +466,39 @@ def fetch_google_news(symbol, limit=5, market='crypto'):
         logger.error(f"Google News error for {symbol}: {e}")
         return None
 
+# ----- منبع 4: Investing.com (جایگزین برای فارکس) -----
+def fetch_investing_news(symbol, limit=5):
+    """دریافت اخبار از Investing.com از طریق RSS"""
+    try:
+        # Investing.com RSS برای اخبار فارکس
+        rss_url = "https://www.investing.com/rss/news_forex.rss"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(rss_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')
+        if not items:
+            return None
+        news_items = []
+        for item in items[:limit]:
+            title_elem = item.find('title')
+            link_elem = item.find('link')
+            title = title_elem.text if title_elem is not None else "بدون عنوان"
+            # فیلتر کردن بر اساس نماد
+            if symbol.upper() not in title.upper():
+                continue
+            title = translate_to_persian(title)
+            link = link_elem.text if link_elem is not None else "#"
+            sentiment = analyze_sentiment(title_elem.text if title_elem is not None else "")
+            news_items.append({'title': title, 'link': link, 'sentiment': sentiment})
+            if len(news_items) >= limit:
+                break
+        return news_items if news_items else None
+    except Exception as e:
+        logger.error(f"Investing.com error for {symbol}: {e}")
+        return None
+
 # ----- تابع اصلی دریافت اخبار کریپتو (با زنجیره منابع) -----
 def get_crypto_news(symbol, limit=5):
     sources = [
@@ -488,6 +521,7 @@ def get_crypto_news(symbol, limit=5):
 # ----- تابع اصلی دریافت اخبار فارکس (با زنجیره منابع) -----
 def get_forex_news(symbol, limit=5):
     sources = [
+        ('Investing.com', fetch_investing_news, symbol, limit),
         ('Bing News', fetch_bing_news, symbol, limit, 'forex'),
         ('Google News', fetch_google_news, symbol, limit, 'forex')
     ]
@@ -501,7 +535,15 @@ def get_forex_news(symbol, limit=5):
             logger.warning(f"Source {source_name} failed for {symbol}: {e}")
             continue
     
-    return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
+    # اگر هیچ خبری پیدا نشد، یک پیام جایگزین با لینک مفید
+    return f"📰 **تحلیل اخبار {symbol.upper()}**\n\n" \
+           f"❌ اخبار لحظه‌ای برای این جفت‌ارز در دسترس نیست.\n\n" \
+           f"💡 برای مشاهده اخبار و تحلیل‌های تخصصی فارکس، می‌توانید از لینک‌های زیر استفاده کنید:\n" \
+           f"🔗 [Investing.com](https://www.investing.com/search/service/search?q={symbol})\n" \
+           f"🔗 [ForexLive](https://www.forexlive.com/)\n" \
+           f"🔗 [DailyFX](https://www.dailyfx.com/)\n\n" \
+           f"📌 **سنتیمنت کلی بازار:** ⚪ **خنثی** (بدون اخبار کافی برای تحلیل)\n" \
+           f"💡 **نتیجه معاملاتی:** ⏳ انتظار"
 
 # ----- کش برای اخبار (با زمان اعتبار ۵ دقیقه) -----
 news_cache = {}
