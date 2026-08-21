@@ -318,7 +318,7 @@ def translate_to_persian(text):
 
 # ----- توابع کمکی برای تحلیل احساسات و ساخت خروجی -----
 def analyze_sentiment_detailed(text):
-    """تحلیل عمیق‌تر احساسات با کلمات کلیدی گسترده"""
+    """تحلیل عمیق‌تر احساسات با کلمات کلیدی گسترده (ورودی باید انگلیسی باشد)"""
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
         "record", "high", "upgrade", "profit", "success", "breakthrough", "jump", "soar", "climb",
@@ -369,7 +369,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     # ---------- ساخت بخش اخبار مثبت ----------
     text = f"✅🗞 **اخبار مثبت ({pos_count} خبر):**\n"
     if positive:
-        for item in positive[:5]:  # حداکثر ۵ خبر مثبت
+        for item in positive[:5]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
@@ -377,14 +377,13 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     # ---------- بخش اخبار منفی ----------
     text += f"\n❌🗞 **اخبار منفی ({neg_count} خبر):**\n"
     if negative:
-        for item in negative[:3]:  # حداکثر ۳ خبر منفی
+        for item in negative[:3]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
 
     # ---------- تحلیل ----------
     text += "\n📝 **تحلیل:**\n"
-    # تحلیل کلی بر اساس اخبار
     if pos_count > neg_count + 1:
         analysis = f"- اخبار مثبت به طور قابل توجهی بر اخبار منفی غلبه دارند.\n"
         analysis += f"- احساسات کلی بازار به سمت **صعودی** متمایل است.\n"
@@ -392,7 +391,6 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
             analysis += f"- وجود {pos_count} خبر مثبت نشان‌دهنده پشتیبانی قوی از {symbol} است.\n"
         else:
             analysis += f"- با وجود {pos_count} خبر مثبت، همچنان باید محتاط بود.\n"
-        # اضافه کردن جزئیات از اخبار مثبت
         if positive:
             analysis += f"- مهم‌ترین رویداد مثبت: {positive[0]['title'][:100]}...\n"
     elif neg_count > pos_count + 1:
@@ -406,13 +404,10 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         analysis = f"- تعداد اخبار مثبت و منفی تقریباً برابر است.\n"
         analysis += f"- بازار در حالت **خنثی** و انتظار برای محرک جدید قرار دارد.\n"
 
-    # اضافه کردن تحلیل کلی از همه اخبار
     if neutral:
         analysis += f"- {len(neutral)} خبر خنثی نیز وجود دارند که نشان‌دهنده ابهام در بازار است.\n"
 
-    # تحلیل از منبع
     analysis += f"- اخبار از منابع {', '.join(source_names)} جمع‌آوری شده‌اند.\n"
-
     text += analysis
 
     # ---------- سنتیمنت بازار ----------
@@ -429,7 +424,6 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         trade_result = "⏳ انتظار — بدون سیگنال واضح، منتظر محرک جدید باشید."
         overall = "⚪ خنثی"
 
-    # ---------- اطمینان ----------
     if total >= 6:
         confidence = "بالا — اخبار متعدد و هم‌جهت، با پوشش رسانه‌ای گسترده."
     elif total >= 4:
@@ -437,18 +431,15 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     else:
         confidence = "پایین — تعداد اخبار محدود است، با احتیاط تصمیم بگیرید."
 
-    # اضافه کردن بخش‌های نهایی
     text += f"\n🎯 **سنتیمنت بازار:** {sentiment}\n"
     text += f"📊 **تاثیر کلی اخبار:** {overall}\n"
     text += f"💡 **نتیجه معاملاتی:** {trade_result}\n"
     text += f"🔎 **اطمینان:** {confidence}\n"
-
-    # اضافه کردن منبع و تاریخ
     text += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | ربات تحلیلگر اخبار"
 
     return text
 
-# ----- منابع دریافت اخبار -----
+# ----- منابع دریافت اخبار (با اصلاح تحلیل احساسات روی عنوان انگلیسی) -----
 
 # 1. CryptoPanic (فقط کریپتو)
 def fetch_cryptopanic(symbol, limit=8):
@@ -468,11 +459,11 @@ def fetch_cryptopanic(symbol, limit=8):
             return None
         news_items = []
         for post in data['results'][:limit]:
-            title = post.get('title', 'بدون عنوان')
-            title = translate_to_persian(title)
+            title_en = post.get('title', 'بدون عنوان')
+            title_fa = translate_to_persian(title_en)
             link = post.get('url', '#')
-            # تشخیص احساسات از تگ‌ها
             sentiment = 'neutral'
+            # اولویت با تگ‌ها
             for tag in post.get('tags', []):
                 if tag.get('slug') in ['bullish', 'positive']:
                     sentiment = 'positive'
@@ -480,11 +471,10 @@ def fetch_cryptopanic(symbol, limit=8):
                 elif tag.get('slug') in ['bearish', 'negative']:
                     sentiment = 'negative'
                     break
-            # اگر تگ نداشت، از تحلیل متن استفاده کن
             if sentiment == 'neutral':
-                sentiment = analyze_sentiment_detailed(title)
+                sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
             news_items.append({
-                'title': title,
+                'title': title_fa,
                 'link': link,
                 'sentiment': sentiment,
                 'source': 'CryptoPanic'
@@ -515,12 +505,12 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
         for item in items[:limit]:
             title_elem = item.find('title')
             link_elem = item.find('link')
-            title = title_elem.text if title_elem is not None else "بدون عنوان"
-            title = translate_to_persian(title)
+            title_en = title_elem.text if title_elem is not None else "بدون عنوان"
+            title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_elem.text if title_elem is not None else "")
+            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
             news_items.append({
-                'title': title,
+                'title': title_fa,
                 'link': link,
                 'sentiment': sentiment,
                 'source': 'Bing News'
@@ -551,12 +541,12 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
         for item in items[:limit]:
             title_elem = item.find('title')
             link_elem = item.find('link')
-            title = title_elem.text if title_elem is not None else "بدون عنوان"
-            title = translate_to_persian(title)
+            title_en = title_elem.text if title_elem is not None else "بدون عنوان"
+            title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_elem.text if title_elem is not None else "")
+            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
             news_items.append({
-                'title': title,
+                'title': title_fa,
                 'link': link,
                 'sentiment': sentiment,
                 'source': 'Google News'
@@ -582,15 +572,15 @@ def fetch_investing_news(symbol, limit=8):
         for item in items[:limit]:
             title_elem = item.find('title')
             link_elem = item.find('link')
-            title = title_elem.text if title_elem is not None else "بدون عنوان"
+            title_en = title_elem.text if title_elem is not None else "بدون عنوان"
             # فیلتر بر اساس نماد
-            if symbol.upper() not in title.upper():
+            if symbol.upper() not in title_en.upper():
                 continue
-            title = translate_to_persian(title)
+            title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_elem.text if title_elem is not None else "")
+            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
             news_items.append({
-                'title': title,
+                'title': title_fa,
                 'link': link,
                 'sentiment': sentiment,
                 'source': 'Investing.com'
@@ -607,7 +597,6 @@ def get_crypto_news(symbol, limit=8):
     all_news = []
     sources_used = []
 
-    # 1. CryptoPanic
     try:
         items = fetch_cryptopanic(symbol, limit)
         if items:
@@ -616,7 +605,6 @@ def get_crypto_news(symbol, limit=8):
     except Exception as e:
         logger.warning(f"CryptoPanic failed: {e}")
 
-    # 2. Bing News
     try:
         items = fetch_bing_news(symbol, limit, 'crypto')
         if items:
@@ -625,7 +613,6 @@ def get_crypto_news(symbol, limit=8):
     except Exception as e:
         logger.warning(f"Bing News failed: {e}")
 
-    # 3. Google News
     try:
         items = fetch_google_news(symbol, limit, 'crypto')
         if items:
@@ -637,7 +624,7 @@ def get_crypto_news(symbol, limit=8):
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
 
-    # حذف تکراری‌ها (بر اساس عنوان)
+    # حذف تکراری‌ها (بر اساس عنوان فارسی)
     seen_titles = set()
     unique_news = []
     for item in all_news:
@@ -652,7 +639,6 @@ def get_forex_news(symbol, limit=8):
     all_news = []
     sources_used = []
 
-    # 1. Investing.com
     try:
         items = fetch_investing_news(symbol, limit)
         if items:
@@ -661,7 +647,6 @@ def get_forex_news(symbol, limit=8):
     except Exception as e:
         logger.warning(f"Investing.com failed: {e}")
 
-    # 2. Bing News
     try:
         items = fetch_bing_news(symbol, limit, 'forex')
         if items:
@@ -670,7 +655,6 @@ def get_forex_news(symbol, limit=8):
     except Exception as e:
         logger.warning(f"Bing News failed: {e}")
 
-    # 3. Google News
     try:
         items = fetch_google_news(symbol, limit, 'forex')
         if items:
@@ -682,7 +666,6 @@ def get_forex_news(symbol, limit=8):
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
 
-    # حذف تکراری‌ها
     seen_titles = set()
     unique_news = []
     for item in all_news:
