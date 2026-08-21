@@ -42,6 +42,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 waiting_for_symbol = {}
+waiting_for_signal = {}  # جدید
 
 # ========== لیست نمادهای معتبر ==========
 VALID_CRYPTO_SYMBOLS = {
@@ -328,8 +329,6 @@ def translate_to_persian(text):
 historical_cache = {}
 
 def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
-    """دریافت داده‌های تاریخی از چند صرافی با کش و fallback"""
-    # بررسی سریع: اگر نماد با USDT تمام نشود، احتمالاً فارکس است و نباید ادامه دهد
     if not symbol.endswith('/USDT'):
         logger.warning(f"Skipping non-USDT symbol: {symbol}")
         return None
@@ -525,9 +524,7 @@ def plot_chart(data, indicators, symbol, support, resistance):
 
 def generate_technical_analysis(symbol):
     try:
-        # بررسی اولیه: اگر نماد با USDT نباشد، آن را به فرمت USDT تبدیل کن
         if not symbol.endswith('/USDT'):
-            # برای کریپتو، نماد را به فرمت USDT تبدیل کن
             symbol_usdt = f"{symbol}/USDT"
         else:
             symbol_usdt = symbol
@@ -616,6 +613,70 @@ def format_analysis_message(data):
         msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
     msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
     return msg
+
+# ========== توابع تولید سیگنال ==========
+
+def generate_crypto_signal(symbol, analysis_data):
+    """تولید سیگنال معاملاتی برای کریپتو بر اساس تحلیل تکنیکال"""
+    if not analysis_data:
+        return "❌ داده‌های کافی برای تولید سیگنال وجود ندارد."
+
+    signal = f"📈 **سیگنال معاملاتی {symbol}**\n\n"
+    signal += f"🔹 **نوع معامله:** {analysis_data['signal']}\n"
+    signal += f"💰 **قیمت ورود (ورود):** {analysis_data['last_price']:,.2f} $\n"
+    
+    if analysis_data['signal'] == 'لانگ':
+        tp = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.5
+        sl = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.3
+        signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
+        signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
+    elif analysis_data['signal'] == 'شورت':
+        tp = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.5
+        sl = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.3
+        signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
+        signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
+    else:
+        signal += "⏳ **سیگنال:** بدون سیگنال واضح – منتظر بمانید.\n"
+        return signal
+
+    signal += f"📊 **نسبت ریسک به ریوارد (R:R):** {analysis_data['rrr']}\n"
+    signal += f"⭐ **امتیاز کیفیت:** {analysis_data['score']}/10\n"
+    signal += f"⚠️ **سطح ریسک:** {analysis_data['risk']}\n"
+    signal += f"📌 **وضعیت اجرا:** {analysis_data['status']}\n"
+    signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو"
+    return signal
+
+def generate_forex_signal(symbol):
+    """تولید سیگنال معاملاتی برای فارکس بر اساس اخبار و سنتیمنت"""
+    try:
+        news_text = get_forex_news(symbol, limit=5)
+        if "🐂" in news_text:
+            sentiment = "صعودی"
+            trade = "✅ خرید (Long)"
+        elif "🐻" in news_text:
+            sentiment = "نزولی"
+            trade = "❌ فروش (Short)"
+        else:
+            sentiment = "خنثی"
+            trade = "⏳ انتظار"
+
+        confidence = "متوسط"
+        if "اطمینان: بالا" in news_text:
+            confidence = "بالا"
+        elif "اطمینان: پایین" in news_text:
+            confidence = "پایین"
+
+        signal = f"📈 **سیگنال معاملاتی {symbol}**\n\n"
+        signal += f"🔹 **نوع معامله:** {trade}\n"
+        signal += f"📊 **تحلیل کلی:**\n{news_text}\n\n"
+        signal += f"🎯 **سنتیمنت بازار:** {sentiment}\n"
+        signal += f"⚠️ **سطح ریسک:** {confidence}\n"
+        signal += f"💡 **توصیه:** {'ورود با حجم کم' if confidence == 'پایین' else 'ورود با مدیریت ریسک'}\n"
+        signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر فارکس"
+        return signal
+    except Exception as e:
+        logger.error(f"Error generating forex signal: {e}")
+        return "❌ خطا در تولید سیگنال فارکس. لطفاً بعداً تلاش کنید."
 
 # ========== توابع اخبار (با مدیریت خطا) ==========
 def analyze_sentiment_detailed(text):
@@ -728,7 +789,6 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     text += f"💡 **نتیجه معاملاتی:** {trade_result}\n"
     text += f"🔎 **اطمینان:** {confidence}\n"
     text += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | ربات تحلیلگر اخبار"
-    
     return text
 
 def fetch_cryptopanic(symbol, limit=8):
@@ -1045,7 +1105,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ===== بخش تحلیل ارز دلخواه (اصلاح‌شده) =====
+# ===== بخش تحلیل ارز دلخواه =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
@@ -1080,9 +1140,7 @@ def analyze_step(message):
         bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید.")
         return
     
-    # بررسی دقیق: آیا نماد در لیست کریپتو است؟
     if symbol not in VALID_CRYPTO_SYMBOLS:
-        # اگر نماد فارکس باشد، پیام مناسب نمایش داده شود
         if symbol in VALID_FOREX_SYMBOLS:
             bot.send_message(
                 user_id,
@@ -1102,7 +1160,6 @@ def analyze_step(message):
             )
         return
     
-    # اگر کریپتو بود، ادامه دهید
     processing_msg = bot.send_message(
         user_id,
         f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۲۰ ثانیه طول بکشد.",
@@ -1161,15 +1218,31 @@ def analyze_step(message):
         except:
             pass
 
-# ---------- سایر دکمه‌ها ----------
+# ---------- دکمه سیگنال معاملاتی (اصلاح‌شده) ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    bot.send_message(user_id, "📈 **سیگنال لحظه‌ای**\n\nبرای دریافت سیگنال، از دکمه **🔍 تحلیل ارز دلخواه** استفاده کنید.", parse_mode='Markdown')
 
+    waiting_for_signal[user_id] = True
+    crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
+    forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
+
+    help_text = (
+        "📈 **سیگنال معاملاتی**\n\n"
+        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
+        "🪙 **ارزهای دیجیتال (تحلیل تکنیکال کامل):**\n"
+        f"`{crypto_list}`\n\n"
+        "💱 **جفت‌ارزهای فارکس (تحلیل بر اساس اخبار):**\n"
+        f"`{forex_list}`\n\n"
+        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "⏳ پردازش ممکن است ۱۰-۲۰ ثانیه طول بکشد."
+    )
+    bot.send_message(user_id, help_text, parse_mode='Markdown')
+
+# ---------- سایر دکمه‌ها ----------
 @bot.message_handler(func=lambda msg: msg.text == "🎯 پیشنهاد خرید")
 def handle_suggest(message):
     user_id = message.chat.id
@@ -1203,7 +1276,7 @@ def handle_help(message):
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا\n"
         "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی\n"
-        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال\n"
+        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال و اخبار\n"
         "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
@@ -1276,11 +1349,75 @@ def callback_back_main(call):
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
 
-# ---------- هندلر پیام‌های متنی (برای دریافت نماد اخبار) ----------
+# ---------- هندلر پیام‌های متنی (برای دریافت نماد اخبار و سیگنال) ----------
 @bot.message_handler(func=lambda msg: True)
 def handle_text_messages(message):
     user_id = message.chat.id
     text = message.text.strip().upper()
+
+    # ===== حالت سیگنال معاملاتی =====
+    if waiting_for_signal.get(user_id):
+        waiting_for_signal.pop(user_id, None)
+        if text not in ALL_VALID_SYMBOLS:
+            crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
+            forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
+            bot.send_message(
+                user_id,
+                f"❌ نماد `{text}` معتبر نیست.\n\n"
+                f"🪙 ارزهای دیجیتال:\n`{crypto_list}`\n\n"
+                f"💱 جفت‌ارزهای فارکس:\n`{forex_list}`",
+                parse_mode='Markdown'
+            )
+            waiting_for_signal[user_id] = True
+            return
+
+        processing_msg = bot.send_message(
+            user_id,
+            f"⏳ در حال تولید سیگنال برای **{text}**... لطفاً صبر کنید.",
+            parse_mode='Markdown'
+        )
+
+        try:
+            if text in VALID_CRYPTO_SYMBOLS:
+                analysis_data, chart_img, error = generate_technical_analysis(text)
+                if error:
+                    bot.send_message(user_id, error, parse_mode='Markdown')
+                elif not analysis_data:
+                    bot.send_message(user_id, "❌ سیگنالی برای این ارز در دسترس نیست.", parse_mode='Markdown')
+                else:
+                    signal_text = generate_crypto_signal(text, analysis_data)
+                    if chart_img:
+                        bot.send_photo(
+                            user_id,
+                            chart_img,
+                            caption=signal_text,
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        bot.send_message(user_id, signal_text, parse_mode='Markdown')
+            else:
+                signal_text = generate_forex_signal(text)
+                bot.send_message(user_id, signal_text, parse_mode='Markdown', disable_web_page_preview=True)
+
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except:
+                pass
+
+        except Exception as e:
+            logger.error(f"Error in signal processing: {e}")
+            bot.send_message(
+                user_id,
+                f"❌ خطا در تولید سیگنال برای `{text}`. لطفاً مجدداً تلاش کنید.",
+                parse_mode='Markdown'
+            )
+            try:
+                bot.delete_message(user_id, processing_msg.message_id)
+            except:
+                pass
+        return
+
+    # ===== حالت اخبار =====
     if waiting_for_symbol.get(user_id) == "news_symbol":
         waiting_for_symbol.pop(user_id, None)
         if text not in ALL_VALID_SYMBOLS:
