@@ -24,7 +24,6 @@ from ta.trend import ADXIndicator
 from ta.volume import MFIIndicator
 from ta.trend import EMAIndicator
 import pandas as pd
-import yfinance as yf  # جدید برای داده‌های فارکس
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -330,10 +329,15 @@ historical_cache = {}
 
 def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     """دریافت داده‌های تاریخی از چند صرافی با کش و fallback"""
+    # بررسی سریع: اگر نماد با USDT تمام نشود، احتمالاً فارکس است و نباید ادامه دهد
+    if not symbol.endswith('/USDT'):
+        logger.warning(f"Skipping non-USDT symbol: {symbol}")
+        return None
+    
     cache_key = f"{symbol}_{timeframe}_{limit}"
     if cache_key in historical_cache:
         data, timestamp = historical_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < 300:  # ۵ دقیقه کش
+        if (datetime.now() - timestamp).seconds < 300:
             return data
     
     exchanges = [
@@ -521,7 +525,14 @@ def plot_chart(data, indicators, symbol, support, resistance):
 
 def generate_technical_analysis(symbol):
     try:
-        data = get_historical_data_multi(f"{symbol}/USDT", '1d', 200)
+        # بررسی اولیه: اگر نماد با USDT نباشد، آن را به فرمت USDT تبدیل کن
+        if not symbol.endswith('/USDT'):
+            # برای کریپتو، نماد را به فرمت USDT تبدیل کن
+            symbol_usdt = f"{symbol}/USDT"
+        else:
+            symbol_usdt = symbol
+            
+        data = get_historical_data_multi(symbol_usdt, '1d', 200)
         if data is None or data.get('close') is None or len(data['close']) < 50:
             return None, None, "❌ داده‌های تاریخی کافی برای این ارز در دسترس نیست. لطفاً بعداً تلاش کنید."
         
@@ -573,103 +584,6 @@ def generate_technical_analysis(symbol):
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
         return None, None, f"❌ خطا در تحلیل تکنیکال: {str(e)}"
-
-# ========== توابع جدید برای فارکس ==========
-
-forex_cache = {}
-
-def get_forex_historical_data(symbol="EURUSD=X", period="1y", interval="1d"):
-    """دریافت داده‌های تاریخی فارکس از yfinance"""
-    cache_key = f"forex_{symbol}_{period}_{interval}"
-    if cache_key in forex_cache:
-        data, timestamp = forex_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < 300:
-            return data
-    
-    try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
-        if df.empty:
-            return None
-        
-        dates = df.index.to_pydatetime()
-        opens = df['Open'].values
-        highs = df['High'].values
-        lows = df['Low'].values
-        closes = df['Close'].values
-        volumes = df['Volume'].values
-        
-        data = {
-            'dates': dates,
-            'open': np.array(opens),
-            'high': np.array(highs),
-            'low': np.array(lows),
-            'close': np.array(closes),
-            'volume': np.array(volumes)
-        }
-        forex_cache[cache_key] = (data, datetime.now())
-        logger.info(f"Forex historical data fetched for {symbol}")
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching forex data: {e}")
-        return None
-
-def generate_forex_technical_analysis(symbol):
-    """تحلیل تکنیکال برای فارکس"""
-    try:
-        yf_symbol = f"{symbol}=X"
-        data = get_forex_historical_data(yf_symbol, period="1y", interval="1d")
-        if data is None or data.get('close') is None or len(data['close']) < 50:
-            return None, None, "❌ داده‌های تاریخی کافی برای این جفت‌ارز در دسترس نیست."
-        
-        indicators = calculate_indicators(data)
-        support, resistance = find_support_resistance(data)
-        signal_type, trend, score = generate_trading_signal(data, indicators)
-        context = determine_context(data)
-        rrr = calculate_rrr(data, signal_type)
-        
-        if score >= 8:
-            risk_level = "پایین"
-        elif score >= 6:
-            risk_level = "متوسط"
-        else:
-            risk_level = "بالا"
-        
-        if score >= 7 and rrr > 2:
-            status = "✅ مناسب برای ورود"
-        elif score >= 5 and rrr > 1.5:
-            status = "⏳ منتظر تایید"
-        else:
-            status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
-        
-        signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
-        signal_persian = signal_map.get(signal_type, 'نامشخص')
-        
-        analysis_data = {
-            'symbol': symbol,
-            'context': context,
-            'trend': trend,
-            'support': support,
-            'resistance': resistance,
-            'signal': signal_persian,
-            'score': score,
-            'rrr': rrr,
-            'risk': risk_level,
-            'status': status,
-            'last_price': data['close'][-1],
-            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0
-        }
-        
-        chart_img = None
-        try:
-            chart_img = plot_chart(data, indicators, symbol, support, resistance)
-        except Exception as chart_error:
-            logger.warning(f"Chart plotting failed for forex: {chart_error}")
-        
-        return analysis_data, chart_img, None
-    except Exception as e:
-        logger.error(f"Error in forex technical analysis: {e}")
-        return None, None, f"❌ خطا در تحلیل تکنیکال فارکس: {str(e)}"
 
 def format_analysis_message(data):
     if not data:
@@ -1131,7 +1045,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ===== بخش تحلیل ارز دلخواه (پشتیبانی از کریپتو و فارکس) =====
+# ===== بخش تحلیل ارز دلخواه (اصلاح‌شده) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
@@ -1140,16 +1054,13 @@ def handle_analyze(message):
         return
     
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
-    forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
     
     help_text = (
         "🔍 **تحلیل تکنیکال پیشرفته**\n\n"
-        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
-        "🪙 **ارزهای دیجیتال:**\n"
+        "لطفاً **نماد** ارز دیجیتال مورد نظر را وارد کنید.\n\n"
+        "🪙 **ارزهای دیجیتال پشتیبانی شده:**\n"
         f"`{crypto_list}`\n\n"
-        "💱 **جفت‌ارزهای فارکس:**\n"
-        f"`{forex_list}`\n\n"
-        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "📌 مثال: `BTC` یا `ETH`\n\n"
         "📊 تحلیل شامل:\n"
         "• چارت قیمت با اندیکاتورهای EMA, ADX, MFI\n"
         "• سطوح حمایت و مقاومت\n"
@@ -1169,21 +1080,29 @@ def analyze_step(message):
         bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید.")
         return
     
-    is_crypto = symbol in VALID_CRYPTO_SYMBOLS
-    is_forex = symbol in VALID_FOREX_SYMBOLS
-    
-    if not is_crypto and not is_forex:
-        crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
-        forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
-        bot.send_message(
-            user_id,
-            f"❌ نماد `{symbol}` معتبر نیست.\n\n"
-            f"🪙 ارزهای دیجیتال:\n`{crypto_list}`\n\n"
-            f"💱 جفت‌ارزهای فارکس:\n`{forex_list}`",
-            parse_mode='Markdown'
-        )
+    # بررسی دقیق: آیا نماد در لیست کریپتو است؟
+    if symbol not in VALID_CRYPTO_SYMBOLS:
+        # اگر نماد فارکس باشد، پیام مناسب نمایش داده شود
+        if symbol in VALID_FOREX_SYMBOLS:
+            bot.send_message(
+                user_id,
+                f"❌ تحلیل تکنیکال فقط برای ارزهای دیجیتال در دسترس است.\n\n"
+                f"💱 جفت‌ارز `{symbol}` برای تحلیل تکنیکال پشتیبانی نمی‌شود.\n\n"
+                f"🪙 لطفاً یکی از ارزهای دیجیتال زیر را وارد کنید:\n"
+                f"`{', '.join(sorted(VALID_CRYPTO_SYMBOLS))}`",
+                parse_mode='Markdown'
+            )
+        else:
+            bot.send_message(
+                user_id,
+                f"❌ نماد `{symbol}` برای تحلیل تکنیکال پشتیبانی نمی‌شود.\n\n"
+                f"🪙 لطفاً یکی از ارزهای دیجیتال زیر را وارد کنید:\n"
+                f"`{', '.join(sorted(VALID_CRYPTO_SYMBOLS))}`",
+                parse_mode='Markdown'
+            )
         return
     
+    # اگر کریپتو بود، ادامه دهید
     processing_msg = bot.send_message(
         user_id,
         f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۲۰ ثانیه طول بکشد.",
@@ -1191,10 +1110,7 @@ def analyze_step(message):
     )
     
     try:
-        if is_crypto:
-            analysis_data, chart_img, error = generate_technical_analysis(symbol)
-        else:  # فارکس
-            analysis_data, chart_img, error = generate_forex_technical_analysis(symbol)
+        analysis_data, chart_img, error = generate_technical_analysis(symbol)
         
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1205,7 +1121,7 @@ def analyze_step(message):
             return
         
         if not analysis_data:
-            bot.send_message(user_id, "❌ تحلیل تکنیکال برای این نماد در دسترس نیست.", parse_mode='Markdown')
+            bot.send_message(user_id, "❌ تحلیل تکنیکال برای این ارز در دسترس نیست.", parse_mode='Markdown')
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
