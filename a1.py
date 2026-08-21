@@ -359,6 +359,12 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     negative = [n for n in all_news_items if n['sentiment'] == 'negative']
     neutral = [n for n in all_news_items if n['sentiment'] == 'neutral']
 
+    # اگر بخش مثبت یا منفی خالی بود، از اخبار خنثی برای پر کردن استفاده کن
+    if not positive and neutral:
+        positive = neutral[:2]  # دو خبر خنثی را به عنوان مثبت نمایش بده
+    if not negative and neutral:
+        negative = neutral[:2]  # دو خبر خنثی را به عنوان منفی نمایش بده
+
     pos_count = len(positive)
     neg_count = len(negative)
     total = pos_count + neg_count + len(neutral)
