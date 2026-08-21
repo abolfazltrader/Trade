@@ -15,13 +15,16 @@ from functools import lru_cache
 from urllib.parse import quote
 from deep_translator import GoogleTranslator
 
-# ========== کتابخانه‌های جدید ==========
+# ========== کتابخانه‌های جدید برای تحلیل تکنیکال ==========
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 import pandas as pd
-import pandas_ta as pta  # جدید
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import MFIIndicator
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -371,7 +374,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== توابع تحلیل تکنیکال با pandas-ta ==========
+# ========== توابع تحلیل تکنیکال با کتابخانه ta ==========
 
 def calculate_indicators(data):
     df = pd.DataFrame({
@@ -380,34 +383,43 @@ def calculate_indicators(data):
         'close': data['close'],
         'volume': data['volume']
     })
+    
     # EMA
-    df['EMA_100'] = pta.ema(df['close'], length=100)
-    df['EMA_200'] = pta.ema(df['close'], length=200)
+    df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
+    df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
+    
     # RSI
-    df['RSI'] = pta.rsi(df['close'], length=14)
+    df['RSI'] = RSIIndicator(close=df['close'], window=14).rsi()
+    
     # MACD
-    macd = pta.macd(df['close'], fast=12, slow=26, signal=9)
-    df['MACD'] = macd['MACD_12_26_9']
-    df['MACD_signal'] = macd['MACDs_12_26_9']
-    df['MACD_hist'] = macd['MACDh_12_26_9']
+    macd = MACD(close=df['close'], window_slow=26, window_fast=12, window_sign=9)
+    df['MACD'] = macd.macd()
+    df['MACD_signal'] = macd.macd_signal()
+    df['MACD_hist'] = macd.macd_diff()
+    
     # Bollinger Bands
-    bb = pta.bbands(df['close'], length=20, std=2)
-    df['BB_upper'] = bb['BBU_20_2.0']
-    df['BB_middle'] = bb['BBM_20_2.0']
-    df['BB_lower'] = bb['BBL_20_2.0']
+    bb = BollingerBands(close=df['close'], window=20, window_dev=2)
+    df['BB_upper'] = bb.bollinger_hband()
+    df['BB_middle'] = bb.bollinger_mavg()
+    df['BB_lower'] = bb.bollinger_lband()
+    
     # Stochastic
-    stoch = pta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
-    df['Stoch_K'] = stoch['STOCHk_14_3_3']
-    df['Stoch_D'] = stoch['STOCHd_14_3_3']
+    stoch = StochasticOscillator(high=df['high'], low=df['low'], close=df['close'], window=14, smooth_window=3)
+    df['Stoch_K'] = stoch.stoch()
+    df['Stoch_D'] = stoch.stoch_signal()
+    
     # ADX
-    adx = pta.adx(df['high'], df['low'], df['close'], length=14)
-    df['ADX'] = adx['ADX_14']
-    df['DI_plus'] = adx['DMP_14']
-    df['DI_minus'] = adx['DMN_14']
+    adx = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
+    df['ADX'] = adx.adx()
+    df['DI_plus'] = adx.adx_pos()
+    df['DI_minus'] = adx.adx_neg()
+    
     # MFI
-    df['MFI'] = pta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
+    df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
+    
     # ATR
-    df['ATR'] = pta.atr(df['high'], df['low'], df['close'], length=14)
+    df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
+    
     return df
 
 def find_support_resistance(data, lookback=50):
