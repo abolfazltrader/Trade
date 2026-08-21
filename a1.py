@@ -20,10 +20,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
-from ta.trend import ADXIndicator
-from ta.volume import MFIIndicator
-from ta.trend import EMAIndicator
 import pandas as pd
+import pandas_ta as pta  # جدید
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -42,7 +40,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 waiting_for_symbol = {}
-waiting_for_signal = {}  # جدید
+waiting_for_signal = {}
 
 # ========== لیست نمادهای معتبر ==========
 VALID_CRYPTO_SYMBOLS = {
@@ -373,7 +371,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== توابع تحلیل تکنیکال ==========
+# ========== توابع تحلیل تکنیکال با pandas-ta ==========
 
 def calculate_indicators(data):
     df = pd.DataFrame({
@@ -382,21 +380,35 @@ def calculate_indicators(data):
         'close': data['close'],
         'volume': data['volume']
     })
-    ema_100 = EMAIndicator(close=df['close'], window=100).ema_indicator().values
-    ema_200 = EMAIndicator(close=df['close'], window=200).ema_indicator().values
-    adx = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
-    adx_values = adx.adx().values
-    di_plus = adx.adx_pos().values
-    di_minus = adx.adx_neg().values
-    mfi = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index().values
-    return {
-        'ema_100': ema_100,
-        'ema_200': ema_200,
-        'adx': adx_values,
-        'di_plus': di_plus,
-        'di_minus': di_minus,
-        'mfi': mfi
-    }
+    # EMA
+    df['EMA_100'] = pta.ema(df['close'], length=100)
+    df['EMA_200'] = pta.ema(df['close'], length=200)
+    # RSI
+    df['RSI'] = pta.rsi(df['close'], length=14)
+    # MACD
+    macd = pta.macd(df['close'], fast=12, slow=26, signal=9)
+    df['MACD'] = macd['MACD_12_26_9']
+    df['MACD_signal'] = macd['MACDs_12_26_9']
+    df['MACD_hist'] = macd['MACDh_12_26_9']
+    # Bollinger Bands
+    bb = pta.bbands(df['close'], length=20, std=2)
+    df['BB_upper'] = bb['BBU_20_2.0']
+    df['BB_middle'] = bb['BBM_20_2.0']
+    df['BB_lower'] = bb['BBL_20_2.0']
+    # Stochastic
+    stoch = pta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
+    df['Stoch_K'] = stoch['STOCHk_14_3_3']
+    df['Stoch_D'] = stoch['STOCHd_14_3_3']
+    # ADX
+    adx = pta.adx(df['high'], df['low'], df['close'], length=14)
+    df['ADX'] = adx['ADX_14']
+    df['DI_plus'] = adx['DMP_14']
+    df['DI_minus'] = adx['DMN_14']
+    # MFI
+    df['MFI'] = pta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
+    # ATR
+    df['ATR'] = pta.atr(df['high'], df['low'], df['close'], length=14)
+    return df
 
 def find_support_resistance(data, lookback=50):
     recent_low = np.min(data['low'][-lookback:])
@@ -404,36 +416,60 @@ def find_support_resistance(data, lookback=50):
     return round(recent_low, 2), round(recent_high, 2)
 
 def generate_trading_signal(data, indicators):
-    last_idx = -1
-    close = data['close'][last_idx]
-    ema_100 = indicators['ema_100'][last_idx]
-    ema_200 = indicators['ema_200'][last_idx]
-    adx = indicators['adx'][last_idx] if not np.isnan(indicators['adx'][last_idx]) else 0
-    di_plus = indicators['di_plus'][last_idx] if not np.isnan(indicators['di_plus'][last_idx]) else 0
-    di_minus = indicators['di_minus'][last_idx] if not np.isnan(indicators['di_minus'][last_idx]) else 0
-    mfi = indicators['mfi'][last_idx] if not np.isnan(indicators['mfi'][last_idx]) else 50
-    
-    long_cond = sum([
-        close > ema_200,
-        close > ema_100,
-        adx > 25,
-        di_plus > di_minus,
-        mfi > 50
-    ])
-    short_cond = sum([
-        close < ema_200,
-        close < ema_100,
-        adx > 25,
-        di_minus > di_plus,
-        mfi < 50
-    ])
-    
-    if long_cond >= 3 and long_cond > short_cond:
-        return 'long', 'صعودی', round(7 + (long_cond / 5), 1)
-    elif short_cond >= 3 and short_cond > long_cond:
-        return 'short', 'نزولی', round(7 + (short_cond / 5), 1)
+    last = indicators.iloc[-1]
+    # شرایط خرید (لانگ)
+    buy_conditions = 0
+    if last['close'] > last['EMA_200']:
+        buy_conditions += 1
+    if last['close'] > last['EMA_100']:
+        buy_conditions += 1
+    if last['RSI'] < 30:
+        buy_conditions += 1
+    if last['MACD'] > last['MACD_signal'] and last['MACD_hist'] > 0:
+        buy_conditions += 1
+    if last['close'] > last['BB_middle']:
+        buy_conditions += 1
+    if last['Stoch_K'] < 20 and last['Stoch_K'] > last['Stoch_D']:
+        buy_conditions += 1
+    if last['ADX'] > 25 and last['DI_plus'] > last['DI_minus']:
+        buy_conditions += 1
+    if last['MFI'] > 50:
+        buy_conditions += 1
+
+    # شرایط فروش (شورت)
+    sell_conditions = 0
+    if last['close'] < last['EMA_200']:
+        sell_conditions += 1
+    if last['close'] < last['EMA_100']:
+        sell_conditions += 1
+    if last['RSI'] > 70:
+        sell_conditions += 1
+    if last['MACD'] < last['MACD_signal'] and last['MACD_hist'] < 0:
+        sell_conditions += 1
+    if last['close'] < last['BB_middle']:
+        sell_conditions += 1
+    if last['Stoch_K'] > 80 and last['Stoch_K'] < last['Stoch_D']:
+        sell_conditions += 1
+    if last['ADX'] > 25 and last['DI_minus'] > last['DI_plus']:
+        sell_conditions += 1
+    if last['MFI'] < 50:
+        sell_conditions += 1
+
+    total_conditions = 8
+    if buy_conditions >= 5:
+        signal = 'long'
+        trend = 'صعودی'
+        score = round(7 + (buy_conditions / total_conditions) * 3, 1)
+    elif sell_conditions >= 5:
+        signal = 'short'
+        trend = 'نزولی'
+        score = round(7 + (sell_conditions / total_conditions) * 3, 1)
     else:
-        return 'neutral', 'خنثی', round(5 + (max(long_cond, short_cond) / 5), 1)
+        signal = 'neutral'
+        trend = 'خنثی'
+        score = round(5 + (max(buy_conditions, sell_conditions) / total_conditions) * 2, 1)
+
+    return signal, trend, score
 
 def determine_context(data):
     last = data['close'][-1]
@@ -485,8 +521,16 @@ def plot_chart(data, indicators, symbol, support, resistance):
             ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
                     color=color, linewidth=1)
         
-        ax1.plot(dates, indicators['ema_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
-        ax1.plot(dates, indicators['ema_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
+        # EMA ها
+        ax1.plot(dates, indicators['EMA_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
+        ax1.plot(dates, indicators['EMA_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
+        
+        # باندهای بولینگر
+        ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Upper')
+        ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Middle')
+        ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Lower')
+        
+        # حمایت و مقاومت
         ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
         ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
         
@@ -538,17 +582,17 @@ def generate_technical_analysis(symbol):
         signal_type, trend, score = generate_trading_signal(data, indicators)
         context = determine_context(data)
         rrr = calculate_rrr(data, signal_type)
+        atr = indicators['ATR'].iloc[-1] if not np.isnan(indicators['ATR'].iloc[-1]) else 0
         
-        if score >= 8:
-            risk_level = "پایین"
-        elif score >= 6:
-            risk_level = "متوسط"
+        # سطح ریسک بر اساس ATR و نوسان
+        if atr > 0:
+            risk_level = "متوسط" if atr / data['close'][-1] < 0.02 else "بالا"
         else:
-            risk_level = "بالا"
+            risk_level = "متوسط"
         
-        if score >= 7 and rrr > 2:
+        if score >= 8 and rrr > 2:
             status = "✅ مناسب برای ورود"
-        elif score >= 5 and rrr > 1.5:
+        elif score >= 6 and rrr > 1.5:
             status = "⏳ منتظر تایید"
         else:
             status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
@@ -568,7 +612,12 @@ def generate_technical_analysis(symbol):
             'risk': risk_level,
             'status': status,
             'last_price': data['close'][-1],
-            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0
+            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0,
+            'timeframe': 'روزانه (Daily)',
+            'atr': atr,
+            'rsi': indicators['RSI'].iloc[-1] if not np.isnan(indicators['RSI'].iloc[-1]) else 0,
+            'macd': indicators['MACD'].iloc[-1] if not np.isnan(indicators['MACD'].iloc[-1]) else 0,
+            'bb_position': 'بالای میانگین' if data['close'][-1] > indicators['BB_middle'].iloc[-1] else 'زیر میانگین'
         }
         
         chart_img = None
@@ -617,26 +666,39 @@ def format_analysis_message(data):
 # ========== توابع تولید سیگنال ==========
 
 def generate_crypto_signal(symbol, analysis_data):
-    """تولید سیگنال معاملاتی برای کریپتو بر اساس تحلیل تکنیکال"""
     if not analysis_data:
         return "❌ داده‌های کافی برای تولید سیگنال وجود ندارد."
 
     signal = f"📈 **سیگنال معاملاتی {symbol}**\n\n"
+    signal += f"⏰ **تایم‌فریم:** {analysis_data['timeframe']}\n"
     signal += f"🔹 **نوع معامله:** {analysis_data['signal']}\n"
     signal += f"💰 **قیمت ورود (ورود):** {analysis_data['last_price']:,.2f} $\n"
     
     if analysis_data['signal'] == 'لانگ':
-        tp = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.5
-        sl = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.3
+        atr = analysis_data.get('atr', 0)
+        if atr > 0:
+            tp = analysis_data['last_price'] + atr * 2
+            sl = analysis_data['last_price'] - atr * 1.5
+        else:
+            tp = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.5
+            sl = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.3
         signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
         signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
     elif analysis_data['signal'] == 'شورت':
-        tp = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.5
-        sl = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.3
+        atr = analysis_data.get('atr', 0)
+        if atr > 0:
+            tp = analysis_data['last_price'] - atr * 2
+            sl = analysis_data['last_price'] + atr * 1.5
+        else:
+            tp = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.5
+            sl = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.3
         signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
         signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
     else:
         signal += "⏳ **سیگنال:** بدون سیگنال واضح – منتظر بمانید.\n"
+        signal += f"📊 **RSI:** {analysis_data.get('rsi', 0):.1f}\n"
+        signal += f"📊 **MACD:** {analysis_data.get('macd', 0):.2f}\n"
+        signal += f"📊 **موقعیت نسبت به BB:** {analysis_data.get('bb_position', 'نامشخص')}\n"
         return signal
 
     signal += f"📊 **نسبت ریسک به ریوارد (R:R):** {analysis_data['rrr']}\n"
@@ -647,7 +709,6 @@ def generate_crypto_signal(symbol, analysis_data):
     return signal
 
 def generate_forex_signal(symbol):
-    """تولید سیگنال معاملاتی برای فارکس بر اساس اخبار و سنتیمنت"""
     try:
         news_text = get_forex_news(symbol, limit=5)
         if "🐂" in news_text:
@@ -1218,7 +1279,7 @@ def analyze_step(message):
         except:
             pass
 
-# ---------- دکمه سیگنال معاملاتی (اصلاح‌شده) ----------
+# ---------- دکمه سیگنال معاملاتی ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 def handle_signal(message):
     user_id = message.chat.id
