@@ -15,15 +15,15 @@ from functools import lru_cache
 from urllib.parse import quote
 from deep_translator import GoogleTranslator
 
-# ========== کتابخانه‌های جدید برای تحلیل تکنیکال ==========
-import pandas as pd
+# ========== کتابخانه‌های جدید برای تحلیل تکنیکال (بدون pandas) ==========
 import numpy as np
 import matplotlib.pyplot as plt
-import mplfinance as mpf
+import matplotlib.dates as mdates
+from io import BytesIO
 from ta.trend import ADXIndicator
 from ta.volume import MFIIndicator
 from ta.trend import EMAIndicator
-from io import BytesIO
+import pandas as pd  # فقط برای ساخت دیتافریم موقت در محاسبه اندیکاتورها (نیاز به pandas ندارد، اما برای سادگی نگه داشته شده)
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -324,117 +324,125 @@ def translate_to_persian(text):
         logger.error(f"Translation error: {e}")
         return text
 
-# ========== توابع تحلیل تکنیکال و رسم چارت ==========
+# ========== توابع تحلیل تکنیکال و رسم چارت (بدون pandas و mplfinance) ==========
 
 def get_historical_data(symbol="BTC/USDT", timeframe='1d', limit=365):
-    """دریافت داده‌های تاریخی از Binance"""
+    """دریافت داده‌های تاریخی از Binance (خروجی دیکشنری)"""
     try:
         exchange = ccxt.binance()
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df
+        dates = [datetime.fromtimestamp(ts/1000) for ts in [x[0] for x in ohlcv]]
+        opens = [x[1] for x in ohlcv]
+        highs = [x[2] for x in ohlcv]
+        lows = [x[3] for x in ohlcv]
+        closes = [x[4] for x in ohlcv]
+        volumes = [x[5] for x in ohlcv]
+        return {
+            'dates': dates,
+            'open': np.array(opens),
+            'high': np.array(highs),
+            'low': np.array(lows),
+            'close': np.array(closes),
+            'volume': np.array(volumes)
+        }
     except Exception as e:
         logger.error(f"Error fetching historical data: {e}")
         return None
 
-def calculate_indicators(df):
-    """محاسبه اندیکاتورهای تکنیکال"""
+def calculate_indicators(data):
+    """محاسبه اندیکاتورها با استفاده از کتابخانه ta (نیاز به دیتافریم موقت)"""
+    # ساخت دیتافریم موقت برای کتابخانه ta
+    df = pd.DataFrame({
+        'high': data['high'],
+        'low': data['low'],
+        'close': data['close'],
+        'volume': data['volume']
+    })
+    
     # EMA 100 و 200
-    df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
-    df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
+    ema_100 = EMAIndicator(close=df['close'], window=100).ema_indicator().values
+    ema_200 = EMAIndicator(close=df['close'], window=200).ema_indicator().values
     
     # ADX 14
     adx = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
-    df['ADX'] = adx.adx()
-    df['DI_plus'] = adx.adx_pos()
-    df['DI_minus'] = adx.adx_neg()
+    adx_values = adx.adx().values
+    di_plus = adx.adx_pos().values
+    di_minus = adx.adx_neg().values
     
     # MFI 14
-    df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
+    mfi = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index().values
     
-    return df
+    return {
+        'ema_100': ema_100,
+        'ema_200': ema_200,
+        'adx': adx_values,
+        'di_plus': di_plus,
+        'di_minus': di_minus,
+        'mfi': mfi
+    }
 
-def find_support_resistance(df, lookback=50):
-    """پیدا کردن سطوح حمایت و مقاومت کلیدی"""
-    # پیدا کردن قله‌ها و دره‌ها
-    recent_df = df.tail(lookback)
-    highs = recent_df['high'].values
-    lows = recent_df['low'].values
-    
-    # حمایت نزدیک‌ترین سطح پایین
-    support = round(recent_df['low'].min(), 2)
-    # مقاومت نزدیک‌ترین سطح بالا
-    resistance = round(recent_df['high'].max(), 2)
-    
-    return support, resistance
+def find_support_resistance(data, lookback=50):
+    """پیدا کردن سطوح حمایت و مقاومت"""
+    recent_low = np.min(data['low'][-lookback:])
+    recent_high = np.max(data['high'][-lookback:])
+    return round(recent_low, 2), round(recent_high, 2)
 
-def generate_trading_signal(df):
-    """تولید سیگنال معاملاتی بر اساس اندیکاتورها"""
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+def generate_trading_signal(data, indicators):
+    """تولید سیگنال معاملاتی"""
+    last_idx = -1
+    close = data['close'][last_idx]
+    ema_100 = indicators['ema_100'][last_idx]
+    ema_200 = indicators['ema_200'][last_idx]
+    adx = indicators['adx'][last_idx] if not np.isnan(indicators['adx'][last_idx]) else 0
+    di_plus = indicators['di_plus'][last_idx] if not np.isnan(indicators['di_plus'][last_idx]) else 0
+    di_minus = indicators['di_minus'][last_idx] if not np.isnan(indicators['di_minus'][last_idx]) else 0
+    mfi = indicators['mfi'][last_idx] if not np.isnan(indicators['mfi'][last_idx]) else 50
     
-    # شرایط لانگ
-    long_conditions = 0
-    if last['close'] > last['EMA_200']:
-        long_conditions += 1
-    if last['close'] > last['EMA_100']:
-        long_conditions += 1
-    if last['ADX'] > 25:
-        long_conditions += 1
-    if last['DI_plus'] > last['DI_minus']:
-        long_conditions += 1
-    if last['MFI'] > 50:
-        long_conditions += 1
+    long_cond = sum([
+        close > ema_200,
+        close > ema_100,
+        adx > 25,
+        di_plus > di_minus,
+        mfi > 50
+    ])
+    short_cond = sum([
+        close < ema_200,
+        close < ema_100,
+        adx > 25,
+        di_minus > di_plus,
+        mfi < 50
+    ])
     
-    # شرایط شورت
-    short_conditions = 0
-    if last['close'] < last['EMA_200']:
-        short_conditions += 1
-    if last['close'] < last['EMA_100']:
-        short_conditions += 1
-    if last['ADX'] > 25:
-        short_conditions += 1
-    if last['DI_minus'] > last['DI_plus']:
-        short_conditions += 1
-    if last['MFI'] < 50:
-        short_conditions += 1
-    
-    if long_conditions >= 3 and long_conditions > short_conditions:
-        return 'long', 'صعودی', round(7 + (long_conditions / 5), 1)
-    elif short_conditions >= 3 and short_conditions > long_conditions:
-        return 'short', 'نزولی', round(7 + (short_conditions / 5), 1)
+    if long_cond >= 3 and long_cond > short_cond:
+        return 'long', 'صعودی', round(7 + (long_cond / 5), 1)
+    elif short_cond >= 3 and short_cond > long_cond:
+        return 'short', 'نزولی', round(7 + (short_cond / 5), 1)
     else:
-        return 'neutral', 'خنثی', round(5 + (max(long_conditions, short_conditions) / 5), 1)
+        return 'neutral', 'خنثی', round(5 + (max(long_cond, short_cond) / 5), 1)
 
-def determine_context(df):
-    """تعیین زمینه روزانه (ساعتی/روزانه)"""
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    if last['close'] > prev['close']:
-        trend = "صعودی"
-    elif last['close'] < prev['close']:
-        trend = "نزولی"
+def determine_context(data):
+    """تعیین زمینه روزانه"""
+    last = data['close'][-1]
+    prev = data['close'][-2]
+    if last > prev:
+        return "4H"
+    elif last < prev:
+        return "4H"
     else:
-        trend = "خنثی"
-    
-    # بررسی بازار 4 ساعته
-    return "4H" if trend != "خنثی" else "خنثی"
+        return "خنثی"
 
-def calculate_rrr(df, signal):
-    """محاسبه نسبت ریسک به ریوارد (R:R)"""
-    last = df.iloc[-1]
-    recent_high = df['high'].tail(20).max()
-    recent_low = df['low'].tail(20).min()
+def calculate_rrr(data, signal):
+    """محاسبه نسبت ریسک به ریوارد"""
+    last = data['close'][-1]
+    recent_high = np.max(data['high'][-20:])
+    recent_low = np.min(data['low'][-20:])
     
     if signal == 'long':
-        entry = last['close']
+        entry = last
         stop_loss = recent_low
         take_profit = recent_high
     elif signal == 'short':
-        entry = last['close']
+        entry = last
         stop_loss = recent_high
         take_profit = recent_low
     else:
@@ -442,70 +450,72 @@ def calculate_rrr(df, signal):
     
     risk = abs(entry - stop_loss)
     reward = abs(take_profit - entry)
-    
     if risk == 0:
         return 0
-    
-    rrr = reward / risk
-    return round(rrr, 2)
+    return round(reward / risk, 2)
 
-def plot_chart(df, symbol, support, resistance):
-    """رسم چارت با اندیکاتورها و ذخیره به عنوان تصویر"""
+def plot_chart(data, indicators, symbol, support, resistance):
+    """رسم چارت با matplotlib"""
     try:
-        # تنظیمات استایل
-        style = mpf.make_mpf_style(
-            base_mpf_style='charles',
-            marketcolors=mpf.make_marketcolors(
-                up='#2ecc71',
-                down='#e74c3c',
-                edge='#95a5a6',
-                wick='#bdc3c7',
-                volume='in',
-                volume_linestyle='solid'
-            ),
-            gridstyle='dotted',
-            y_on_right=True,
-            facecolor='#1a1a2e',
-            edgecolor='#2c3e50'
-        )
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={'height_ratios': [3, 1]})
+        fig.patch.set_facecolor('#1a1a2e')
         
-        # اضافه کردن اندیکاتورها
-        apds = [
-            mpf.make_addplot(df['EMA_100'], color='#f39c12', width=1, linestyle='--', label='EMA 100'),
-            mpf.make_addplot(df['EMA_200'], color='#9b59b6', width=1, linestyle='--', label='EMA 200'),
-        ]
+        dates = data['dates']
+        closes = data['close']
+        highs = data['high']
+        lows = data['low']
+        opens = data['open']
         
-        # ساخت چارت
-        fig, axes = mpf.plot(
-            df.tail(150),
-            type='candle',
-            style=style,
-            volume=True,
-            addplot=apds,
-            figsize=(16, 10),
-            returnfig=True,
-            xrotation=0,
-            datetime_format='%d %b',
-            warn_too_much_data=1000,
-            title=f'\n{str(symbol)} - Daily Chart with EMA(100), EMA(200), ADX(14), MFI(14)',
-            ylabel='Price (USDT)',
-            ylabel_lower='Volume',
-            panel_ratios=(3, 1)
-        )
+        # رسم کندل‌ها (ساده شده)
+        for i in range(len(dates)):
+            color = '#2ecc71' if closes[i] >= opens[i] else '#e74c3c'
+            # بدنه کندل
+            ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]), 
+                   color=color, width=0.6, alpha=0.8)
+            # خط بالایی (high)
+            ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]], 
+                    color=color, linewidth=1)
+            # خط پایینی (low)
+            ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
+                    color=color, linewidth=1)
         
-        # اضافه کردن سطوح حمایت و مقاومت
-        ax = axes[0]
-        ax.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support}')
-        ax.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance}')
+        # EMA ها
+        ax1.plot(dates, indicators['ema_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
+        ax1.plot(dates, indicators['ema_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
         
-        # اضافه کردن متن اطلاعات
-        last_price = df.iloc[-1]['close']
-        ax.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax.transAxes,
-                fontsize=12, color='white', verticalalignment='top', bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
+        # حمایت و مقاومت
+        ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
+        ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
         
-        # ذخیره تصویر در حافظه
+        # قیمت آخر
+        last_price = closes[-1]
+        ax1.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax1.transAxes,
+                fontsize=12, color='white', verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
+        
+        # تنظیمات محور
+        ax1.set_facecolor('#1a1a2e')
+        ax1.grid(True, alpha=0.3, linestyle='dotted')
+        ax1.legend(loc='upper left')
+        ax1.set_title(f'{symbol} - Daily Chart', color='white', fontsize=14)
+        ax1.set_ylabel('Price (USDT)', color='white')
+        ax1.tick_params(colors='white')
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+        
+        # حجم (پایین)
+        ax2.bar(dates, data['volume'], color='#3498db', alpha=0.7)
+        ax2.set_facecolor('#1a1a2e')
+        ax2.grid(True, alpha=0.3, linestyle='dotted')
+        ax2.set_ylabel('Volume', color='white')
+        ax2.tick_params(colors='white')
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+        
+        plt.xticks(rotation=0)
+        plt.tight_layout()
+        
+        # ذخیره تصویر
         img_data = BytesIO()
-        plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight')
+        plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
         plt.close()
         
@@ -516,29 +526,19 @@ def plot_chart(df, symbol, support, resistance):
         return None
 
 def generate_technical_analysis(symbol):
-    """تولید تحلیل کامل تکنیکال برای یک نماد"""
+    """تولید تحلیل کامل تکنیکال"""
     try:
-        # دریافت داده‌های تاریخی
-        df = get_historical_data(f"{symbol}/USDT", '1d', 365)
-        if df is None or df.empty:
+        data = get_historical_data(f"{symbol}/USDT", '1d', 365)
+        if not data:
             return None, None, "❌ داده‌های تاریخی در دسترس نیست."
         
-        # محاسبه اندیکاتورها
-        df = calculate_indicators(df)
+        indicators = calculate_indicators(data)
+        support, resistance = find_support_resistance(data)
+        signal_type, trend, score = generate_trading_signal(data, indicators)
+        context = determine_context(data)
+        rrr = calculate_rrr(data, signal_type)
         
-        # پیدا کردن حمایت و مقاومت
-        support, resistance = find_support_resistance(df)
-        
-        # تولید سیگنال
-        signal_type, trend, score = generate_trading_signal(df)
-        
-        # تعیین زمینه
-        context = determine_context(df)
-        
-        # محاسبه R:R
-        rrr = calculate_rrr(df, signal_type)
-        
-        # تعیین سطح ریسک
+        # سطح ریسک
         if score >= 8:
             risk_level = "پایین"
         elif score >= 6:
@@ -546,7 +546,7 @@ def generate_technical_analysis(symbol):
         else:
             risk_level = "بالا"
         
-        # تعیین وضعیت اجرا
+        # وضعیت اجرا
         if score >= 7 and rrr > 2:
             status = "✅ مناسب برای ورود"
         elif score >= 5 and rrr > 1.5:
@@ -554,14 +554,10 @@ def generate_technical_analysis(symbol):
         else:
             status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
         
-        # ترجمه signal_type به فارسی
+        # ترجمه
         signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
         signal_persian = signal_map.get(signal_type, 'نامشخص')
         
-        # ترجمه trend
-        trend_map = {'صعودی': 'صعودی', 'نزولی': 'نزولی', 'خنثی': 'خنثی'}
-        
-        # آماده‌سازی داده‌های تحلیل
         analysis_data = {
             'symbol': symbol,
             'context': context,
@@ -573,13 +569,11 @@ def generate_technical_analysis(symbol):
             'rrr': rrr,
             'risk': risk_level,
             'status': status,
-            'last_price': df.iloc[-1]['close'],
-            'change_24h': ((df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close']) * 100
+            'last_price': data['close'][-1],
+            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100
         }
         
-        # رسم چارت
-        chart_img = plot_chart(df, symbol, support, resistance)
-        
+        chart_img = plot_chart(data, indicators, symbol, support, resistance)
         return analysis_data, chart_img, None
         
     except Exception as e:
@@ -587,7 +581,7 @@ def generate_technical_analysis(symbol):
         return None, None, f"❌ خطا در تحلیل تکنیکال: {str(e)}"
 
 def format_analysis_message(data):
-    """قالب‌بندی پیام تحلیل برای ارسال به کاربر"""
+    """قالب‌بندی پیام تحلیل"""
     if not data:
         return "❌ اطلاعات کافی برای تحلیل وجود ندارد."
     
@@ -603,7 +597,6 @@ def format_analysis_message(data):
     msg += f"- **سطح ریسک (حد ضرر):** {data['risk']}\n"
     msg += f"- **وضعیت اجرا:** {data['status']}\n\n"
     
-    # بخش تحلیل تکمیلی
     if data['signal'] == 'لانگ':
         msg += f"**تحلیل:**\n"
         msg += f"قیمت {data['symbol']} با شکست مقاومت {data['resistance']:,.2f} وارد فاز صعودی شده است. "
@@ -621,11 +614,9 @@ def format_analysis_message(data):
         msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
     
     msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
-    
     return msg
 
 # ========== توابع اخبار (قبلی) ==========
-# (همان توابع قبلی برای اخبار)
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -1059,16 +1050,13 @@ def handle_analyze(message):
         return
     
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
-    forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
     
     help_text = (
         "🔍 **تحلیل تکنیکال پیشرفته**\n\n"
-        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
-        "🪙 **ارزهای دیجیتال:**\n"
+        "لطفاً **نماد** ارز دیجیتال مورد نظر را وارد کنید.\n\n"
+        "🪙 **ارزهای دیجیتال پشتیبانی شده:**\n"
         f"`{crypto_list}`\n\n"
-        "💱 **جفت‌ارزهای فارکس:**\n"
-        f"`{forex_list}`\n\n"
-        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "📌 مثال: `BTC` یا `ETH`\n\n"
         "📊 تحلیل شامل:\n"
         "• چارت قیمت با اندیکاتورهای EMA, ADX, MFI\n"
         "• سطوح حمایت و مقاومت\n"
@@ -1088,7 +1076,6 @@ def analyze_step(message):
         bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید.")
         return
     
-    # اعتبارسنجی (فقط برای کریپتو چون چارت فقط برای کریپتو رسم می‌شود)
     if symbol not in VALID_CRYPTO_SYMBOLS:
         bot.send_message(
             user_id,
@@ -1106,7 +1093,6 @@ def analyze_step(message):
     )
     
     try:
-        # تولید تحلیل تکنیکال
         analysis_data, chart_img, error = generate_technical_analysis(symbol)
         
         if error:
@@ -1125,10 +1111,8 @@ def analyze_step(message):
                 pass
             return
         
-        # قالب‌بندی پیام تحلیل
         analysis_msg = format_analysis_message(analysis_data)
         
-        # ارسال چارت + تحلیل
         if chart_img:
             bot.send_photo(
                 user_id,
