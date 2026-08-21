@@ -335,9 +335,9 @@ def analyze_sentiment_detailed(text):
     text_lower = text.lower()
     pos = sum(1 for w in positive_words if w in text_lower)
     neg = sum(1 for w in negative_words if w in text_lower)
-    if pos > neg + 1:
+    if pos > neg:
         return 'positive'
-    elif neg > pos + 1:
+    elif neg > pos:
         return 'negative'
     else:
         return 'neutral'
@@ -384,7 +384,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
 
     # ---------- تحلیل ----------
     text += "\n📝 **تحلیل:**\n"
-    if pos_count > neg_count + 1:
+    if pos_count > neg_count:
         analysis = f"- اخبار مثبت به طور قابل توجهی بر اخبار منفی غلبه دارند.\n"
         analysis += f"- احساسات کلی بازار به سمت **صعودی** متمایل است.\n"
         if pos_count >= 3:
@@ -393,7 +393,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
             analysis += f"- با وجود {pos_count} خبر مثبت، همچنان باید محتاط بود.\n"
         if positive:
             analysis += f"- مهم‌ترین رویداد مثبت: {positive[0]['title'][:100]}...\n"
-    elif neg_count > pos_count + 1:
+    elif neg_count > pos_count:
         analysis = f"- اخبار منفی بر اخبار مثبت غلبه دارند.\n"
         analysis += f"- احساسات کلی بازار به سمت **نزولی** متمایل است.\n"
         if neg_count >= 3:
@@ -401,7 +401,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         if negative:
             analysis += f"- مهم‌ترین رویداد منفی: {negative[0]['title'][:100]}...\n"
     else:
-        analysis = f"- تعداد اخبار مثبت و منفی تقریباً برابر است.\n"
+        analysis = f"- تعداد اخبار مثبت و منفی برابر است.\n"
         analysis += f"- بازار در حالت **خنثی** و انتظار برای محرک جدید قرار دارد.\n"
 
     if neutral:
@@ -411,11 +411,11 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     text += analysis
 
     # ---------- سنتیمنت بازار ----------
-    if pos_count > neg_count + 1:
+    if pos_count > neg_count:
         sentiment = "🐂 **صعودی**"
         trade_result = "✅ خرید محتاطانه — با توجه به سیگنال‌های صعودی قوی و اخبار مثبت متعدد."
         overall = "✅ مثبت"
-    elif neg_count > pos_count + 1:
+    elif neg_count > pos_count:
         sentiment = "🐻 **نزولی**"
         trade_result = "❌ فروش (Short) یا انتظار — اخبار منفی غالب هستند."
         overall = "❌ منفی"
@@ -439,7 +439,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
 
     return text
 
-# ----- منابع دریافت اخبار (با اصلاح تحلیل احساسات روی عنوان انگلیسی) -----
+# ----- منابع دریافت اخبار (با اصلاح قطعی) -----
 
 # 1. CryptoPanic (فقط کریپتو)
 def fetch_cryptopanic(symbol, limit=8):
@@ -462,8 +462,9 @@ def fetch_cryptopanic(symbol, limit=8):
             title_en = post.get('title', 'بدون عنوان')
             title_fa = translate_to_persian(title_en)
             link = post.get('url', '#')
+            
+            # تشخیص احساسات - اولویت با تگ‌ها
             sentiment = 'neutral'
-            # اولویت با تگ‌ها
             for tag in post.get('tags', []):
                 if tag.get('slug') in ['bullish', 'positive']:
                     sentiment = 'positive'
@@ -471,8 +472,11 @@ def fetch_cryptopanic(symbol, limit=8):
                 elif tag.get('slug') in ['bearish', 'negative']:
                     sentiment = 'negative'
                     break
+            
+            # اگر تگ نداشت، تحلیل روی متن انگلیسی
             if sentiment == 'neutral':
-                sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
+                sentiment = analyze_sentiment_detailed(title_en)
+            
             news_items.append({
                 'title': title_fa,
                 'link': link,
@@ -508,7 +512,7 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
+            sentiment = analyze_sentiment_detailed(title_en)
             news_items.append({
                 'title': title_fa,
                 'link': link,
@@ -544,7 +548,7 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
+            sentiment = analyze_sentiment_detailed(title_en)
             news_items.append({
                 'title': title_fa,
                 'link': link,
@@ -578,7 +582,7 @@ def fetch_investing_news(symbol, limit=8):
                 continue
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
-            sentiment = analyze_sentiment_detailed(title_en)  # تحلیل روی انگلیسی
+            sentiment = analyze_sentiment_detailed(title_en)
             news_items.append({
                 'title': title_fa,
                 'link': link,
