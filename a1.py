@@ -15,7 +15,7 @@ from functools import lru_cache
 from urllib.parse import quote
 from deep_translator import GoogleTranslator
 
-# ========== کتابخانه‌های جدید برای تحلیل تکنیکال (بدون pandas) ==========
+# ========== کتابخانه‌های جدید ==========
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -23,7 +23,7 @@ from io import BytesIO
 from ta.trend import ADXIndicator
 from ta.volume import MFIIndicator
 from ta.trend import EMAIndicator
-import pandas as pd  # فقط برای ساخت دیتافریم موقت در محاسبه اندیکاتورها (نیاز به pandas ندارد، اما برای سادگی نگه داشته شده)
+import pandas as pd
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 waiting_for_symbol = {}
 
-# ========== لیست نمادهای معتبر برای اخبار ==========
+# ========== لیست نمادهای معتبر ==========
 VALID_CRYPTO_SYMBOLS = {
     "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
     "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
@@ -324,54 +324,67 @@ def translate_to_persian(text):
         logger.error(f"Translation error: {e}")
         return text
 
-# ========== توابع تحلیل تکنیکال و رسم چارت (بدون pandas و mplfinance) ==========
+# ========== کش داده‌های تاریخی ==========
+historical_cache = {}
 
-def get_historical_data(symbol="BTC/USDT", timeframe='1d', limit=365):
-    """دریافت داده‌های تاریخی از Binance (خروجی دیکشنری)"""
-    try:
-        exchange = ccxt.binance()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        dates = [datetime.fromtimestamp(ts/1000) for ts in [x[0] for x in ohlcv]]
-        opens = [x[1] for x in ohlcv]
-        highs = [x[2] for x in ohlcv]
-        lows = [x[3] for x in ohlcv]
-        closes = [x[4] for x in ohlcv]
-        volumes = [x[5] for x in ohlcv]
-        return {
-            'dates': dates,
-            'open': np.array(opens),
-            'high': np.array(highs),
-            'low': np.array(lows),
-            'close': np.array(closes),
-            'volume': np.array(volumes)
-        }
-    except Exception as e:
-        logger.error(f"Error fetching historical data: {e}")
-        return None
+def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
+    """دریافت داده‌های تاریخی از چند صرافی با کش و fallback"""
+    cache_key = f"{symbol}_{timeframe}_{limit}"
+    if cache_key in historical_cache:
+        data, timestamp = historical_cache[cache_key]
+        if (datetime.now() - timestamp).seconds < 300:  # ۵ دقیقه کش
+            return data
+    
+    exchanges = [
+        ccxt.binance({'enableRateLimit': True, 'timeout': 10000}),
+        ccxt.kraken({'enableRateLimit': True, 'timeout': 10000}),
+        ccxt.kucoin({'enableRateLimit': True, 'timeout': 10000}),
+        ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
+    ]
+    
+    for exchange in exchanges:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            dates = [datetime.fromtimestamp(ts/1000) for ts in [x[0] for x in ohlcv]]
+            opens = [x[1] for x in ohlcv]
+            highs = [x[2] for x in ohlcv]
+            lows = [x[3] for x in ohlcv]
+            closes = [x[4] for x in ohlcv]
+            volumes = [x[5] for x in ohlcv]
+            data = {
+                'dates': dates,
+                'open': np.array(opens),
+                'high': np.array(highs),
+                'low': np.array(lows),
+                'close': np.array(closes),
+                'volume': np.array(volumes)
+            }
+            historical_cache[cache_key] = (data, datetime.now())
+            logger.info(f"Historical data fetched from {exchange.name} for {symbol}")
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to fetch from {exchange.name}: {e}")
+            time.sleep(1)
+            continue
+    
+    return None
+
+# ========== توابع تحلیل تکنیکال ==========
 
 def calculate_indicators(data):
-    """محاسبه اندیکاتورها با استفاده از کتابخانه ta (نیاز به دیتافریم موقت)"""
-    # ساخت دیتافریم موقت برای کتابخانه ta
     df = pd.DataFrame({
         'high': data['high'],
         'low': data['low'],
         'close': data['close'],
         'volume': data['volume']
     })
-    
-    # EMA 100 و 200
     ema_100 = EMAIndicator(close=df['close'], window=100).ema_indicator().values
     ema_200 = EMAIndicator(close=df['close'], window=200).ema_indicator().values
-    
-    # ADX 14
     adx = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
     adx_values = adx.adx().values
     di_plus = adx.adx_pos().values
     di_minus = adx.adx_neg().values
-    
-    # MFI 14
     mfi = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index().values
-    
     return {
         'ema_100': ema_100,
         'ema_200': ema_200,
@@ -382,13 +395,11 @@ def calculate_indicators(data):
     }
 
 def find_support_resistance(data, lookback=50):
-    """پیدا کردن سطوح حمایت و مقاومت"""
     recent_low = np.min(data['low'][-lookback:])
     recent_high = np.max(data['high'][-lookback:])
     return round(recent_low, 2), round(recent_high, 2)
 
 def generate_trading_signal(data, indicators):
-    """تولید سیگنال معاملاتی"""
     last_idx = -1
     close = data['close'][last_idx]
     ema_100 = indicators['ema_100'][last_idx]
@@ -421,7 +432,6 @@ def generate_trading_signal(data, indicators):
         return 'neutral', 'خنثی', round(5 + (max(long_cond, short_cond) / 5), 1)
 
 def determine_context(data):
-    """تعیین زمینه روزانه"""
     last = data['close'][-1]
     prev = data['close'][-2]
     if last > prev:
@@ -432,11 +442,9 @@ def determine_context(data):
         return "خنثی"
 
 def calculate_rrr(data, signal):
-    """محاسبه نسبت ریسک به ریوارد"""
     last = data['close'][-1]
     recent_high = np.max(data['high'][-20:])
     recent_low = np.min(data['low'][-20:])
-    
     if signal == 'long':
         entry = last
         stop_loss = recent_low
@@ -447,7 +455,6 @@ def calculate_rrr(data, signal):
         take_profit = recent_low
     else:
         return 0
-    
     risk = abs(entry - stop_loss)
     reward = abs(take_profit - entry)
     if risk == 0:
@@ -455,7 +462,6 @@ def calculate_rrr(data, signal):
     return round(reward / risk, 2)
 
 def plot_chart(data, indicators, symbol, support, resistance):
-    """رسم چارت با matplotlib"""
     try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
@@ -466,34 +472,25 @@ def plot_chart(data, indicators, symbol, support, resistance):
         lows = data['low']
         opens = data['open']
         
-        # رسم کندل‌ها (ساده شده)
         for i in range(len(dates)):
             color = '#2ecc71' if closes[i] >= opens[i] else '#e74c3c'
-            # بدنه کندل
             ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]), 
                    color=color, width=0.6, alpha=0.8)
-            # خط بالایی (high)
             ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]], 
                     color=color, linewidth=1)
-            # خط پایینی (low)
             ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
                     color=color, linewidth=1)
         
-        # EMA ها
         ax1.plot(dates, indicators['ema_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
         ax1.plot(dates, indicators['ema_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
-        
-        # حمایت و مقاومت
         ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
         ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
         
-        # قیمت آخر
         last_price = closes[-1]
         ax1.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax1.transAxes,
                 fontsize=12, color='white', verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
         
-        # تنظیمات محور
         ax1.set_facecolor('#1a1a2e')
         ax1.grid(True, alpha=0.3, linestyle='dotted')
         ax1.legend(loc='upper left')
@@ -502,7 +499,6 @@ def plot_chart(data, indicators, symbol, support, resistance):
         ax1.tick_params(colors='white')
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
         
-        # حجم (پایین)
         ax2.bar(dates, data['volume'], color='#3498db', alpha=0.7)
         ax2.set_facecolor('#1a1a2e')
         ax2.grid(True, alpha=0.3, linestyle='dotted')
@@ -513,24 +509,20 @@ def plot_chart(data, indicators, symbol, support, resistance):
         plt.xticks(rotation=0)
         plt.tight_layout()
         
-        # ذخیره تصویر
         img_data = BytesIO()
         plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
         plt.close()
-        
         return img_data
-        
     except Exception as e:
         logger.error(f"Error plotting chart: {e}")
         return None
 
 def generate_technical_analysis(symbol):
-    """تولید تحلیل کامل تکنیکال"""
     try:
-        data = get_historical_data(f"{symbol}/USDT", '1d', 365)
-        if not data:
-            return None, None, "❌ داده‌های تاریخی در دسترس نیست."
+        data = get_historical_data_multi(f"{symbol}/USDT", '1d', 200)
+        if not data or not data.get('close') or len(data['close']) < 50:
+            return None, None, "❌ داده‌های تاریخی کافی برای این ارز در دسترس نیست. لطفاً بعداً تلاش کنید."
         
         indicators = calculate_indicators(data)
         support, resistance = find_support_resistance(data)
@@ -538,7 +530,6 @@ def generate_technical_analysis(symbol):
         context = determine_context(data)
         rrr = calculate_rrr(data, signal_type)
         
-        # سطح ریسک
         if score >= 8:
             risk_level = "پایین"
         elif score >= 6:
@@ -546,7 +537,6 @@ def generate_technical_analysis(symbol):
         else:
             risk_level = "بالا"
         
-        # وضعیت اجرا
         if score >= 7 and rrr > 2:
             status = "✅ مناسب برای ورود"
         elif score >= 5 and rrr > 1.5:
@@ -554,7 +544,6 @@ def generate_technical_analysis(symbol):
         else:
             status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
         
-        # ترجمه
         signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
         signal_persian = signal_map.get(signal_type, 'نامشخص')
         
@@ -570,21 +559,18 @@ def generate_technical_analysis(symbol):
             'risk': risk_level,
             'status': status,
             'last_price': data['close'][-1],
-            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100
+            'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0
         }
         
         chart_img = plot_chart(data, indicators, symbol, support, resistance)
         return analysis_data, chart_img, None
-        
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
         return None, None, f"❌ خطا در تحلیل تکنیکال: {str(e)}"
 
 def format_analysis_message(data):
-    """قالب‌بندی پیام تحلیل"""
     if not data:
         return "❌ اطلاعات کافی برای تحلیل وجود ندارد."
-    
     msg = f"📊 **تحلیل تکنیکال {data['symbol']}**\n\n"
     msg += f"### 1. خلاصه کلی\n"
     msg += f"- **زمینه روزانه:** {data['context']}\n"
@@ -596,7 +582,6 @@ def format_analysis_message(data):
     msg += f"- **کیفیت رویداد (R:R):** {data['rrr']}\n"
     msg += f"- **سطح ریسک (حد ضرر):** {data['risk']}\n"
     msg += f"- **وضعیت اجرا:** {data['status']}\n\n"
-    
     if data['signal'] == 'لانگ':
         msg += f"**تحلیل:**\n"
         msg += f"قیمت {data['symbol']} با شکست مقاومت {data['resistance']:,.2f} وارد فاز صعودی شده است. "
@@ -612,11 +597,10 @@ def format_analysis_message(data):
     else:
         msg += f"**تحلیل:**\n"
         msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
-    
     msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
     return msg
 
-# ========== توابع اخبار (قبلی) ==========
+# ========== توابع اخبار (با مدیریت خطا) ==========
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -734,8 +718,11 @@ def fetch_cryptopanic(symbol, limit=8):
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
         params = {'auth_token': '', 'currencies': symbol.lower(), 'kind': 'news', 'public': 'true', 'filter': 'hot'}
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
         response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.warning(f"CryptoPanic status {response.status_code}")
+            return None
         data = response.json()
         if not data.get('results'):
             return None
@@ -757,7 +744,7 @@ def fetch_cryptopanic(symbol, limit=8):
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'CryptoPanic'})
         return news_items
     except Exception as e:
-        logger.error(f"CryptoPanic error for {symbol}: {e}")
+        logger.error(f"CryptoPanic error: {e}")
         return None
 
 def fetch_bing_news(symbol, limit=8, market='crypto'):
@@ -1041,7 +1028,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ---------- دکمه تحلیل ارز دلخواه (نسخه پیشرفته با چارت) ----------
+# ===== بخش تحلیل ارز دلخواه (اصلاح‌شده) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
@@ -1063,7 +1050,7 @@ def handle_analyze(message):
         "• سیگنال معاملاتی (لانگ/شورت)\n"
         "• نسبت ریسک به ریوارد (R:R)\n"
         "• سطح ریسک و وضعیت اجرا\n\n"
-        "⏳ تحلیل ممکن است ۱۰-۱۵ ثانیه زمان ببرد."
+        "⏳ تحلیل ممکن است ۱۰-۲۰ ثانیه زمان ببرد."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
     bot.register_next_step_handler(message, analyze_step)
