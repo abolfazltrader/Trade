@@ -521,7 +521,8 @@ def plot_chart(data, indicators, symbol, support, resistance):
 def generate_technical_analysis(symbol):
     try:
         data = get_historical_data_multi(f"{symbol}/USDT", '1d', 200)
-        if not data or not data.get('close') or len(data['close']) < 50:
+        # اصلاح شرط: بررسی وجود داده و تعداد کافی
+        if data is None or data.get('close') is None or len(data['close']) < 50:
             return None, None, "❌ داده‌های تاریخی کافی برای این ارز در دسترس نیست. لطفاً بعداً تلاش کنید."
         
         indicators = calculate_indicators(data)
@@ -562,7 +563,14 @@ def generate_technical_analysis(symbol):
             'change_24h': ((data['close'][-1] - data['close'][-2]) / data['close'][-2]) * 100 if len(data['close']) > 1 else 0
         }
         
-        chart_img = plot_chart(data, indicators, symbol, support, resistance)
+        # رسم چارت با مدیریت خطا
+        chart_img = None
+        try:
+            chart_img = plot_chart(data, indicators, symbol, support, resistance)
+        except Exception as chart_error:
+            logger.warning(f"Chart plotting failed: {chart_error}")
+            # چارت رسم نشد، اما تحلیل ارسال می‌شود
+        
         return analysis_data, chart_img, None
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
@@ -1100,13 +1108,19 @@ def analyze_step(message):
         
         analysis_msg = format_analysis_message(analysis_data)
         
+        # ارسال چارت فقط در صورت وجود و بدون خطا
         if chart_img:
-            bot.send_photo(
-                user_id,
-                chart_img,
-                caption=analysis_msg,
-                parse_mode='Markdown'
-            )
+            try:
+                bot.send_photo(
+                    user_id,
+                    chart_img,
+                    caption=analysis_msg,
+                    parse_mode='Markdown'
+                )
+            except Exception as photo_error:
+                logger.warning(f"Failed to send photo: {photo_error}")
+                # در صورت خطا در ارسال عکس، فقط متن ارسال شود
+                bot.send_message(user_id, analysis_msg, parse_mode='Markdown')
         else:
             bot.send_message(user_id, analysis_msg, parse_mode='Markdown')
         
