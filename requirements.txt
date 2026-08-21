@@ -7,3 +7,4 @@ matplotlib==3.7.2
 ta==0.9.0
 setuptools==65.5.0
 wheel==0.40.0
+yfinance==0.2.28
