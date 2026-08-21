@@ -4,8 +4,6 @@ requests==2.31.0
 Flask==2.3.3
 deep-translator==1.11.4
 matplotlib==3.7.2
-pandas==2.0.3
-mplfinance==0.12.10
 ta==0.9.0
 setuptools==65.5.0
 wheel==0.40.0
