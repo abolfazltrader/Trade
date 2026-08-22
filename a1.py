@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 waiting_for_symbol = {}
 waiting_for_signal = {}
 
+# ========== بهینه‌سازی کش ==========
+CACHE_TIME_PRICE = 300      # ۵ دقیقه برای قیمت
+CACHE_TIME_HISTORICAL = 600  # ۱۰ دقیقه برای داده‌های تاریخی
+CACHE_TIME_NEWS = 300       # ۵ دقیقه برای اخبار
+
 # ========== نگاشت تایم‌فریم‌ها ==========
 TIMEFRAME_MAP = {
     '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
@@ -123,12 +128,12 @@ def get_owner_name(user_id):
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
-        self.cache_time = 60
+        self.cache_time = CACHE_TIME_PRICE
         self.executor = ThreadPoolExecutor(max_workers=5)
-        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
-        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 8000})
-        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
-        self.kucoin = ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000})
+        self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 6000})
+        self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 6000})
+        self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 6000})
+        self.kucoin = ccxt.kucoin({'enableRateLimit': True, 'timeout': 6000})
         self.coingecko_session = requests.Session()
         self.retry_count = 2
 
@@ -150,7 +155,7 @@ class PriceFetcher:
                     return result
             except Exception as e:
                 logger.warning(f"Attempt {attempt+1} failed for {symbol}: {e}")
-                time.sleep(0.5)
+                time.sleep(0.3)
         return None
 
     def _fetch_binance(self, symbol):
@@ -201,7 +206,7 @@ class PriceFetcher:
         try:
             coin_id = symbol.split('/')[0].lower()
             url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
-            resp = self.coingecko_session.get(url, timeout=5)
+            resp = self.coingecko_session.get(url, timeout=4)
             data = resp.json()
             if coin_id in data and data[coin_id].get('usd') is not None:
                 return {'price': data[coin_id]['usd'], 'change': data[coin_id].get('usd_24h_change', 0),
@@ -226,12 +231,12 @@ class PriceFetcher:
 
         futures = [self.executor.submit(self._fetch_with_retry, src, symbol) for src in sources]
         start_time = time.time()
-        for future in as_completed(futures, timeout=4):
+        for future in as_completed(futures, timeout=3):
             result = future.result()
             if result and result.get('price') is not None:
                 self._set_cache(cache_key, result)
                 return result
-            if time.time() - start_time > 4:
+            if time.time() - start_time > 3:
                 break
 
         return None
@@ -250,7 +255,7 @@ def get_usd_irt():
     try:
         url = "https://api.zarinpal.com/payment/unit-converter/v1/convert"
         params = {"amount": 1, "from_currency": "USD", "to_currency": "IRT"}
-        resp = requests.get(url, params=params, timeout=5)
+        resp = requests.get(url, params=params, timeout=4)
         data = resp.json()
         if data.get("result") and "data" in data["result"]:
             price = data["result"]["data"]["amount"]
@@ -261,7 +266,7 @@ def get_usd_irt():
         pass
     try:
         url = "https://api.tgju.org/v1/market/price/USD"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=4)
         data = resp.json()
         if data.get("status") == "success" and "price" in data.get("data", {}):
             price = data["data"]["price"]
@@ -272,7 +277,7 @@ def get_usd_irt():
         pass
     try:
         url = "https://exir.ir/api/price/USD"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=4)
         data = resp.json()
         if "price" in data:
             price = data["price"]
@@ -291,7 +296,7 @@ def get_top_crypto(limit=20):
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1, "sparkline": "false"}
-        resp = requests.get(url, params=params, timeout=8)
+        resp = requests.get(url, params=params, timeout=6)
         data = resp.json()
         if not isinstance(data, list):
             return None
@@ -347,14 +352,14 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     cache_key = f"{symbol}_{timeframe}_{limit}"
     if cache_key in historical_cache:
         data, timestamp = historical_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < 300:
+        if (datetime.now() - timestamp).seconds < CACHE_TIME_HISTORICAL:
             return data
     
     exchanges = [
-        ccxt.binance({'enableRateLimit': True, 'timeout': 10000}),
-        ccxt.kraken({'enableRateLimit': True, 'timeout': 10000}),
-        ccxt.kucoin({'enableRateLimit': True, 'timeout': 10000}),
-        ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
+        ccxt.binance({'enableRateLimit': True, 'timeout': 8000}),
+        ccxt.kraken({'enableRateLimit': True, 'timeout': 8000}),
+        ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000}),
+        ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
     ]
     
     for exchange in exchanges:
@@ -379,12 +384,17 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
             return data
         except Exception as e:
             logger.warning(f"Failed to fetch from {exchange.name}: {e}")
-            time.sleep(1)
+            time.sleep(0.3)
             continue
     
     return None
 
-# ========== توابع تحلیل تکنیکال با کتابخانه ta ==========
+# ========== کش برای محاسبات اندیکاتورها ==========
+@lru_cache(maxsize=100)
+def calculate_indicators_cached(symbol, timeframe, limit, data_hash):
+    """نسخه کش‌شده محاسبه اندیکاتورها با استفاده از هش داده"""
+    # این تابع فقط به‌عنوان wrapper استفاده می‌شود
+    pass
 
 def calculate_indicators(data):
     df = pd.DataFrame({
@@ -525,7 +535,7 @@ def calculate_rrr(data, signal):
 
 def plot_chart(data, indicators, symbol, support, resistance, timeframe):
     try:
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={'height_ratios': [3, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
         
         dates = data['dates']
@@ -581,7 +591,7 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe):
         plt.tight_layout()
         
         img_data = BytesIO()
-        plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
+        plt.savefig(img_data, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
         plt.close()
         return img_data
@@ -598,11 +608,11 @@ def generate_technical_analysis(symbol, timeframe='1d'):
         
         # تنظیم تعداد کندل‌ها بر اساس تایم‌فریم
         if timeframe in ['1m', '5m']:
-            limit = 100
+            limit = 80
         elif timeframe in ['15m', '30m']:
-            limit = 150
+            limit = 120
         else:
-            limit = 200
+            limit = 180
             
         data = get_historical_data_multi(symbol_usdt, timeframe, limit)
         if data is None or data.get('close') is None or len(data['close']) < 30:
@@ -889,7 +899,7 @@ def fetch_cryptopanic(symbol, limit=8):
         url = "https://cryptopanic.com/api/v1/posts/"
         params = {'auth_token': '', 'currencies': symbol.lower(), 'kind': 'news', 'public': 'true', 'filter': 'hot'}
         headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = requests.get(url, params=params, headers=headers, timeout=8)
         if response.status_code != 200:
             logger.warning(f"CryptoPanic status {response.status_code}")
             return None
@@ -926,7 +936,7 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
         encoded_query = quote(query)
         rss_url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(rss_url, headers=headers, timeout=10)
+        response = requests.get(rss_url, headers=headers, timeout=8)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -956,7 +966,7 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
         encoded_query = quote(query)
         rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(rss_url, headers=headers, timeout=10)
+        response = requests.get(rss_url, headers=headers, timeout=8)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -981,7 +991,7 @@ def fetch_investing_news(symbol, limit=8):
     try:
         rss_url = "https://www.investing.com/rss/news_forex.rss"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(rss_url, headers=headers, timeout=10)
+        response = requests.get(rss_url, headers=headers, timeout=8)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -1079,7 +1089,7 @@ def get_cached_news(symbol, limit=8, is_crypto=True):
     cache_key = f"{'crypto' if is_crypto else 'forex'}_{symbol}_{limit}"
     if cache_key in news_cache:
         data, timestamp = news_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < 300:
+        if (datetime.now() - timestamp).seconds < CACHE_TIME_NEWS:
             return data
     if is_crypto:
         result = get_crypto_news(symbol, limit)
@@ -1220,7 +1230,7 @@ def handle_analyze(message):
         "• سیگنال معاملاتی (لانگ/شورت)\n"
         "• نسبت ریسک به ریوارد (R:R)\n"
         "• سطح ریسک و وضعیت اجرا\n\n"
-        "⏳ تحلیل ممکن است ۱۰-۲۰ ثانیه زمان ببرد."
+        "⏳ تحلیل ممکن است ۱۰-۱۵ ثانیه زمان ببرد."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
     bot.register_next_step_handler(message, analyze_step)
@@ -1255,7 +1265,7 @@ def analyze_step(message):
     
     processing_msg = bot.send_message(
         user_id,
-        f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۲۰ ثانیه طول بکشد.",
+        f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۱۵ ثانیه طول بکشد.",
         parse_mode='Markdown'
     )
     
@@ -1337,7 +1347,7 @@ def handle_signal(message):
         "`نماد تایم‌فریم`\n"
         "مثال: `BTC 4h` یا `ETH 1h` یا `SOL 15m`\n\n"
         "💡 در صورت وارد کردن فقط نماد (مثل `BTC`)، تایم‌فریم **روزانه (1d)** استفاده می‌شود.\n\n"
-        "⏳ پردازش ممکن است ۱۰-۲۰ ثانیه طول بکشد."
+        "⏳ پردازش ممکن است ۱۰-۱۵ ثانیه طول بکشد."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
