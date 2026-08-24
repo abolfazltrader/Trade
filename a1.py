@@ -14,8 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from urllib.parse import quote
 from deep_translator import GoogleTranslator
-
-# ========== کتابخانه‌های جدید ==========
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -27,84 +25,104 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator
 import yfinance as yf
 
-# ---------- تنظیمات اولیه ----------
+# ---------- تنظیمات امنیتی و محیطی ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set!")
 
-BOT_USERNAME = "Crypto_forex_2026_bot"
-BASE_URL = "https://trade-i4js.onrender.com"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "default_secret_change_me")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "Crypto_forex_2026_bot")
+BASE_URL = os.environ.get("BASE_URL", "https://trade-i4js.onrender.com")
 
-ADMIN_IDS = [6542890217]
+ADMIN_IDS_ENV = os.environ.get("ADMIN_IDS", "6542890217")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()]
+
+# تنظیمات Rate Limiting (تعداد درخواست در دقیقه برای هر کاربر)
+RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", 20))
+RATE_LIMIT_PERIOD = 60  # ثانیه
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 
-logging.basicConfig(level=logging.INFO)
+# غیرفعال کردن debug در محیط تولید
+app.debug = False
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-waiting_for_symbol = {}
-waiting_for_signal = {}
+# ---------- Rate Limiter ----------
+rate_limit_store = {}  # {user_id: [timestamps]}
+rate_limit_lock = None  # برای سادگی از threading.Lock استفاده می‌کنیم
+import threading
+rate_limit_lock = threading.Lock()
 
-# ========== بهینه‌سازی کش ==========
-CACHE_TIME_PRICE = 300
-CACHE_TIME_HISTORICAL = 600
-CACHE_TIME_NEWS = 300  # ۵ دقیقه کش برای اخبار
+def is_rate_limited(user_id):
+    """بررسی محدودیت نرخ درخواست برای کاربر"""
+    now = time.time()
+    with rate_limit_lock:
+        if user_id not in rate_limit_store:
+            rate_limit_store[user_id] = []
+        # حذف زمان‌های قدیمی‌تر از دوره
+        rate_limit_store[user_id] = [t for t in rate_limit_store[user_id] if now - t < RATE_LIMIT_PERIOD]
+        if len(rate_limit_store[user_id]) >= RATE_LIMIT_REQUESTS:
+            return True
+        rate_limit_store[user_id].append(now)
+        return False
 
-# ========== نگاشت تایم‌فریم‌ها ==========
-TIMEFRAME_MAP = {
-    '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
-    '1h': '1h', '4h': '4h', '1d': '1d'
-}
-TIMEFRAME_NAMES = {
-    '1m': '۱ دقیقه', '5m': '۵ دقیقه', '15m': '۱۵ دقیقه',
-    '30m': '۳۰ دقیقه', '1h': '۱ ساعت', '4h': '۴ ساعت', '1d': 'روزانه'
-}
+# ---------- امنیت Webhook ----------
+@app.before_request
+def check_webhook_secret():
+    if request.path == '/webhook':
+        secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+        if secret != WEBHOOK_SECRET:
+            logger.warning("Unauthorized webhook request (invalid secret)")
+            return jsonify({"status": "unauthorized"}), 401
 
-# ========== لیست نمادهای معتبر ==========
-VALID_CRYPTO_SYMBOLS = {
-    "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
-    "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
-    "BCH", "HYPE", "BGB", "XMR", "PI", "PEPE", "UNI", "APT", "OKB",
-    "ONDO", "NEAR", "TRUMP", "TAO", "ICP", "KAS", "ETC", "AAVE", "MNT",
-    "ENA", "FIL", "FARTCOIN"
-}
+# ---------- دیتابیس با مدیریت context ----------
+def get_db_connection():
+    conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-VALID_FOREX_SYMBOLS = {
-    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "CHFJPY"
-}
+def init_db():
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            user_name TEXT,
+            register_date TEXT,
+            expiry_date TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            plan TEXT,
+            amount INTEGER,
+            status TEXT,
+            created_at TEXT
+        )""")
+        conn.commit()
 
-ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
+init_db()
 
-# ---------- دیتابیس ----------
-conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
-c = conn.cursor()
-c.execute("""CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    user_name TEXT,
-    register_date TEXT,
-    expiry_date TEXT
-)""")
-c.execute("""CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    plan TEXT,
-    amount INTEGER,
-    status TEXT,
-    created_at TEXT
-)""")
-conn.commit()
-
-# ---------- توابع کمکی ----------
+# ---------- توابع کمکی با امنیت بیشتر ----------
 def get_user_expiry(user_id):
-    c.execute("SELECT expiry_date FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    return row[0] if row else None
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT expiry_date FROM users WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        return row['expiry_date'] if row else None
 
 def set_user_expiry(user_id, days=7):
     expiry = (datetime.now() + timedelta(days=days)).isoformat()
-    c.execute("INSERT OR REPLACE INTO users (user_id, expiry_date) VALUES (?, ?)", (user_id, expiry))
-    conn.commit()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO users (user_id, expiry_date) VALUES (?, ?)", (user_id, expiry))
+        conn.commit()
 
 def is_user_expired(user_id):
     if user_id in ADMIN_IDS:
@@ -122,14 +140,24 @@ def get_owner_name(user_id):
         if chat.last_name:
             name += " " + chat.last_name
         return name.strip() or "کاربر"
-    except:
+    except Exception:
         return "کاربر"
 
-# ========== سیستم دریافت قیمت (چندمنبعی با کش و بهبود یافته) ==========
+def safe_symbol(symbol):
+    """اعتبارسنجی و پاکسازی نماد"""
+    if not symbol:
+        return None
+    symbol = symbol.strip().upper()
+    # فقط حروف، اعداد و اسلش مجاز
+    if not re.match(r'^[A-Z0-9/]+$', symbol):
+        return None
+    return symbol
+
+# ========== سیستم دریافت قیمت (بدون تغییر امنیتی خاص) ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
-        self.cache_time = CACHE_TIME_PRICE
+        self.cache_time = 300
         self.executor = ThreadPoolExecutor(max_workers=5)
         self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 4000})
         self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 4000})
@@ -302,7 +330,7 @@ class PriceFetcher:
 
 fetcher = PriceFetcher()
 
-# ---------- توابع عمومی دریافت قیمت ----------
+# ---------- توابع عمومی دریافت قیمت (بدون تغییر) ----------
 def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
@@ -385,7 +413,7 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== توابع ترجمه ==========
+# ---------- توابع ترجمه (بدون تغییر) ----------
 translation_cache = {}
 
 def translate_to_persian(text):
@@ -417,7 +445,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     cache_key = f"{symbol}_{timeframe}_{limit}"
     if cache_key in historical_cache:
         data, timestamp = historical_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < CACHE_TIME_HISTORICAL:
+        if (datetime.now() - timestamp).seconds < 600:
             return data
     
     exchanges = [
@@ -471,7 +499,7 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
     if cache_key in forex_cache:
         data, timestamp = forex_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < CACHE_TIME_HISTORICAL:
+        if (datetime.now() - timestamp).seconds < 600:
             return data
     
     try:
@@ -505,7 +533,7 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         logger.error(f"Error fetching forex data for {symbol}: {e}")
         return None
 
-# ========== توابع تحلیل تکنیکال (مشترک) ==========
+# ========== توابع تحلیل تکنیکال (بدون تغییر) ==========
 def calculate_indicators(data):
     df = pd.DataFrame({
         'high': data['high'],
@@ -771,7 +799,7 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
         return analysis_data, chart_img, None
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
-        return None, None, f"❌ خطا در تحلیل تکنیکال: {str(e)}"
+        return None, None, f"❌ خطا در تحلیل تکنیکال: لطفاً مجدداً تلاش کنید."
 
 def format_analysis_message(data):
     if not data:
@@ -849,10 +877,8 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار (با چندین منبع و بهبود تحلیل احساسات) ==========
-
+# ========== توابع اخبار (بدون تغییر) ==========
 def analyze_sentiment_detailed(text):
-    """تحلیل عمیق‌تر احساسات با کلمات کلیدی گسترده (ورودی انگلیسی)"""
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
         "record", "high", "upgrade", "profit", "success", "breakthrough", "jump", "soar", "climb",
@@ -874,7 +900,6 @@ def analyze_sentiment_detailed(text):
     pos = sum(1 for w in positive_words if w in text_lower)
     neg = sum(1 for w in negative_words if w in text_lower)
     
-    # امتیازدهی دقیق‌تر
     if pos > neg + 1:
         return 'positive'
     elif neg > pos + 1:
@@ -889,16 +914,13 @@ def analyze_sentiment_detailed(text):
         return 'neutral'
 
 def build_detailed_news_message(symbol, all_news_items, source_names):
-    """ساخت پیام نهایی اخبار با دسته‌بندی مثبت، منفی و خنثی"""
     if not all_news_items:
         return f"❌ هیچ خبری برای `{symbol}` از منابع {', '.join(source_names)} یافت نشد."
     
-    # دسته‌بندی بر اساس sentiment
     positive = [n for n in all_news_items if n['sentiment'] == 'positive']
     negative = [n for n in all_news_items if n['sentiment'] == 'negative']
     neutral = [n for n in all_news_items if n['sentiment'] == 'neutral']
     
-    # اگر بخش مثبت یا منفی خالی بود، از اخبار خنثی برای پر کردن استفاده کن
     if not positive and neutral:
         positive = neutral[:2]
     if not negative and neutral:
@@ -911,23 +933,20 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     if total == 0:
         return f"📭 هیچ خبر مرتبطی برای `{symbol}` پیدا نشد."
     
-    # ---------- ساخت بخش اخبار مثبت ----------
     text = f"✅🗞 **اخبار مثبت ({pos_count} خبر):**\n"
     if positive:
-        for item in positive[:5]:  # حداکثر ۵ خبر مثبت
+        for item in positive[:5]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
     
-    # ---------- بخش اخبار منفی ----------
     text += f"\n❌🗞 **اخبار منفی ({neg_count} خبر):**\n"
     if negative:
-        for item in negative[:3]:  # حداکثر ۳ خبر منفی
+        for item in negative[:3]:
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
     
-    # ---------- تحلیل ----------
     text += "\n📝 **تحلیل:**\n"
     if pos_count > neg_count:
         analysis = f"- اخبار مثبت به طور قابل توجهی بر اخبار منفی غلبه دارند.\n"
@@ -955,7 +974,6 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     analysis += f"- اخبار از منابع {', '.join(source_names)} جمع‌آوری شده‌اند.\n"
     text += analysis
     
-    # ---------- سنتیمنت بازار ----------
     if pos_count > neg_count:
         sentiment = "🐂 **صعودی**"
         trade_result = "✅ خرید محتاطانه — با توجه به سیگنال‌های صعودی قوی و اخبار مثبت متعدد."
@@ -969,7 +987,6 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         trade_result = "⏳ انتظار — بدون سیگنال واضح، منتظر محرک جدید باشید."
         overall = "⚪ خنثی"
     
-    # ---------- اطمینان ----------
     if total >= 6:
         confidence = "بالا — اخبار متعدد و هم‌جهت، با پوشش رسانه‌ای گسترده."
     elif total >= 4:
@@ -985,10 +1002,8 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     
     return text
 
-# ----- منابع دریافت اخبار (بهبود یافته) -----
-
+# ----- منابع دریافت اخبار -----
 def fetch_cryptopanic(symbol, limit=8):
-    """دریافت اخبار از CryptoPanic (رایگان، بدون کلید)"""
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
         params = {
@@ -1028,7 +1043,6 @@ def fetch_cryptopanic(symbol, limit=8):
         return None
 
 def fetch_bing_news(symbol, limit=8, market='crypto'):
-    """دریافت اخبار از Bing News RSS"""
     try:
         if market == 'crypto':
             query = f"{symbol} cryptocurrency news"
@@ -1052,7 +1066,6 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
-            # اگر عنوان فارسی خالی بود، از عنوان انگلیسی استفاده کن
             if not title_fa or title_fa == title_en:
                 title_fa = title_en
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Bing News'})
@@ -1062,7 +1075,6 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
         return None
 
 def fetch_google_news(symbol, limit=8, market='crypto'):
-    """دریافت اخبار از Google News RSS"""
     try:
         if market == 'crypto':
             query = f"{symbol} cryptocurrency"
@@ -1095,7 +1107,6 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
         return None
 
 def fetch_investing_news(symbol, limit=8):
-    """دریافت اخبار فارکس از Investing.com RSS"""
     try:
         rss_url = "https://www.investing.com/rss/news_forex.rss"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -1111,7 +1122,6 @@ def fetch_investing_news(symbol, limit=8):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
-            # فیلتر بر اساس نماد
             if symbol.upper() not in title_en.upper():
                 continue
             title_fa = translate_to_persian(title_en)
@@ -1128,7 +1138,6 @@ def fetch_investing_news(symbol, limit=8):
         return None
 
 def fetch_coindesk_news(symbol, limit=8):
-    """دریافت اخبار از CoinDesk RSS (برای کریپتو)"""
     try:
         rss_url = "https://www.coindesk.com/arc/outboundfeeds/rss/"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -1144,7 +1153,6 @@ def fetch_coindesk_news(symbol, limit=8):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
-            # فیلتر بر اساس نماد
             if symbol.upper() not in title_en.upper():
                 continue
             title_fa = translate_to_persian(title_en)
@@ -1160,12 +1168,10 @@ def fetch_coindesk_news(symbol, limit=8):
         logger.error(f"CoinDesk error for {symbol}: {e}")
         return None
 
-# ----- تابع اصلی دریافت اخبار کریپتو (با چندین منبع) -----
 def get_crypto_news(symbol, limit=8):
     all_news = []
     sources_used = []
     
-    # لیست منابع با ترتیب اولویت
     sources = [
         ('CryptoPanic', fetch_cryptopanic, symbol, limit),
         ('Bing News', fetch_bing_news, symbol, limit, 'crypto'),
@@ -1179,7 +1185,6 @@ def get_crypto_news(symbol, limit=8):
             if items:
                 all_news.extend(items)
                 sources_used.append(source_name)
-                # اگر تعداد اخبار کافی است، ادامه نده
                 if len(all_news) >= limit * 2:
                     break
         except Exception as e:
@@ -1189,7 +1194,6 @@ def get_crypto_news(symbol, limit=8):
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
     
-    # حذف تکراری‌ها (بر اساس عنوان)
     seen_titles = set()
     unique_news = []
     for item in all_news:
@@ -1197,13 +1201,11 @@ def get_crypto_news(symbol, limit=8):
             seen_titles.add(item['title'])
             unique_news.append(item)
     
-    # اگر منبع‌های معتبری استفاده نشده‌اند، از نام منابع استفاده کن
     if not sources_used:
         sources_used = ['منابع مختلف']
     
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
-# ----- تابع اصلی دریافت اخبار فارکس (با چندین منبع) -----
 def get_forex_news(symbol, limit=8):
     all_news = []
     sources_used = []
@@ -1241,14 +1243,13 @@ def get_forex_news(symbol, limit=8):
     
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
-# ----- کش برای اخبار (زمان اعتبار ۵ دقیقه) -----
 news_cache = {}
 
 def get_cached_news(symbol, limit=8, is_crypto=True):
     cache_key = f"{'crypto' if is_crypto else 'forex'}_{symbol}_{limit}"
     if cache_key in news_cache:
         data, timestamp = news_cache[cache_key]
-        if (datetime.now() - timestamp).seconds < CACHE_TIME_NEWS:
+        if (datetime.now() - timestamp).seconds < 300:
             return data
     if is_crypto:
         result = get_crypto_news(symbol, limit)
@@ -1256,6 +1257,35 @@ def get_cached_news(symbol, limit=8, is_crypto=True):
         result = get_forex_news(symbol, limit)
     news_cache[cache_key] = (result, datetime.now())
     return result
+
+# ---------- نگاشت تایم‌فریم‌ها ----------
+TIMEFRAME_MAP = {
+    '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
+    '1h': '1h', '4h': '4h', '1d': '1d'
+}
+TIMEFRAME_NAMES = {
+    '1m': '۱ دقیقه', '5m': '۵ دقیقه', '15m': '۱۵ دقیقه',
+    '30m': '۳۰ دقیقه', '1h': '۱ ساعت', '4h': '۴ ساعت', '1d': 'روزانه'
+}
+
+# ========== لیست نمادهای معتبر ==========
+VALID_CRYPTO_SYMBOLS = {
+    "BTC", "ETH", "DOGE", "BNB", "XRP", "SOL", "TON", "TRX", "LTC", "DOT",
+    "AVAX", "LINK", "MATIC", "POL", "SUI", "LEO", "SHIB", "HBAR", "XLM",
+    "BCH", "HYPE", "BGB", "XMR", "PI", "PEPE", "UNI", "APT", "OKB",
+    "ONDO", "NEAR", "TRUMP", "TAO", "ICP", "KAS", "ETC", "AAVE", "MNT",
+    "ENA", "FIL", "FARTCOIN"
+}
+
+VALID_FOREX_SYMBOLS = {
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "CHFJPY"
+}
+
+ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
+
+# ========== متغیرهای حالت ==========
+waiting_for_symbol = {}
+waiting_for_signal = {}
 
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
@@ -1288,14 +1318,27 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
+# ---------- دکوراتور برای اعمال Rate Limit روی هندلرها ----------
+def rate_limited_handler(func):
+    def wrapper(message):
+        user_id = message.from_user.id
+        if is_rate_limited(user_id):
+            bot.reply_to(message, "⚠️ شما درخواست‌های زیادی ارسال کرده‌اید. لطفاً یک دقیقه صبر کنید.")
+            return
+        return func(message)
+    return wrapper
+
 # ---------- دستورات و هندلرها ----------
 @bot.message_handler(commands=['start'])
+@rate_limited_handler
 def start(message):
     user_id = message.from_user.id
     name = get_owner_name(user_id)
-    c.execute("INSERT OR IGNORE INTO users (user_id, user_name) VALUES (?, ?)", (user_id, name))
-    c.execute("UPDATE users SET user_name = ? WHERE user_id = ?", (name, user_id))
-    conn.commit()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO users (user_id, user_name) VALUES (?, ?)", (user_id, name))
+        c.execute("UPDATE users SET user_name = ? WHERE user_id = ?", (name, user_id))
+        conn.commit()
     if not get_user_expiry(user_id) and user_id not in ADMIN_IDS:
         set_user_expiry(user_id, 7)
     expiry_date = get_user_expiry(user_id)
@@ -1313,6 +1356,7 @@ def start(message):
     bot.send_message(user_id, welcome, reply_markup=main_menu_keyboard())
 
 @bot.message_handler(commands=['admin'])
+@rate_limited_handler
 def admin_panel(message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
@@ -1322,16 +1366,20 @@ def admin_panel(message):
     bot.send_message(user_id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['stats'])
+@rate_limited_handler
 def stats_command(message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         return
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
     bot.send_message(user_id, f"📊 **آمار ربات**\n\n👤 تعداد کل کاربران: {total_users}", parse_mode='Markdown')
 
 # ---------- دکمه قیمت لحظه‌ای ----------
 @bot.message_handler(func=lambda msg: msg.text == "📊 قیمت لحظه‌ای")
+@rate_limited_handler
 def handle_price(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
@@ -1341,6 +1389,7 @@ def handle_price(message):
 
 # ---------- دکمه اخبار ----------
 @bot.message_handler(func=lambda msg: msg.text == "📰 اخبار امروز و هفته")
+@rate_limited_handler
 def handle_news(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
@@ -1369,6 +1418,7 @@ def handle_news(message):
 
 # ===== بخش تحلیل ارز دلخواه (تایم‌فریم ۴ ساعته) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
+@rate_limited_handler
 def handle_analyze(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
@@ -1399,10 +1449,10 @@ def handle_analyze(message):
 
 def analyze_step(message):
     user_id = message.chat.id
-    symbol = message.text.strip().upper()
+    symbol = safe_symbol(message.text.strip())
     
     if not symbol:
-        bot.send_message(user_id, "❌ لطفاً یک نماد معتبر وارد کنید.")
+        bot.send_message(user_id, "❌ لطفاً یک نماد معتبر (فقط حروف و اعداد) وارد کنید.")
         return
     
     if symbol not in ALL_VALID_SYMBOLS:
@@ -1468,7 +1518,7 @@ def analyze_step(message):
         logger.error(f"Error in analyze_step: {e}")
         bot.send_message(
             user_id,
-            f"❌ خطا در تحلیل `{symbol}` در تایم‌فریم ۴ ساعته. لطفاً مجدداً تلاش کنید.\n\n{str(e)}",
+            f"❌ خطا در تحلیل `{symbol}` در تایم‌فریم ۴ ساعته. لطفاً مجدداً تلاش کنید.",
             parse_mode='Markdown'
         )
         try:
@@ -1478,6 +1528,7 @@ def analyze_step(message):
 
 # ---------- دکمه سیگنال معاملاتی ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
+@rate_limited_handler
 def handle_signal(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
@@ -1508,6 +1559,7 @@ def handle_signal(message):
 
 # ---------- سایر دکمه‌ها ----------
 @bot.message_handler(func=lambda msg: msg.text == "🎯 پیشنهاد خرید")
+@rate_limited_handler
 def handle_suggest(message):
     user_id = message.chat.id
     if is_user_expired(user_id):
@@ -1517,6 +1569,7 @@ def handle_suggest(message):
     bot.send_message(user_id, suggest_text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "👤 پنل کاربری")
+@rate_limited_handler
 def handle_panel(message):
     user_id = message.chat.id
     if user_id in ADMIN_IDS:
@@ -1535,6 +1588,7 @@ def handle_panel(message):
     bot.send_message(user_id, text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: msg.text == "ℹ️ راهنما")
+@rate_limited_handler
 def handle_help(message):
     help_text = (
         "ℹ️ **راهنما**\n\n"
@@ -1550,6 +1604,7 @@ def handle_help(message):
 
 # ---------- هندلرهای کالبک قیمت ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
+@rate_limited_handler
 def callback_price(call):
     user_id = call.from_user.id
     if is_user_expired(user_id):
@@ -1619,6 +1674,7 @@ def callback_price(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_main")
+@rate_limited_handler
 def callback_back_main(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
@@ -1626,9 +1682,13 @@ def callback_back_main(call):
 
 # ---------- هندلر پیام‌های متنی (برای دریافت نماد اخبار و سیگنال) ----------
 @bot.message_handler(func=lambda msg: True)
+@rate_limited_handler
 def handle_text_messages(message):
     user_id = message.chat.id
-    text = message.text.strip().upper()
+    text = safe_symbol(message.text.strip())
+    if not text:
+        bot.reply_to(message, "❌ لطفاً یک متن معتبر وارد کنید.")
+        return
 
     # ===== حالت سیگنال معاملاتی =====
     if waiting_for_signal.get(user_id):
@@ -1760,7 +1820,7 @@ def handle_text_messages(message):
                 pass
         return
 
-# ---------- مسیرهای Webhook (با اضافه شدن مسیرهای پینگ) ----------
+# ---------- مسیرهای Webhook ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -1776,28 +1836,25 @@ def webhook():
 def index():
     return "ربات تحلیلگر بازار فعال است", 200
 
-# ========== مسیرهای جدید برای پینگ کرون‌جاب ==========
 @app.route('/ping')
 def ping():
-    """مسیر ساده برای پینگ کرون‌جاب (خروجی بسیار کوچک)"""
     return "OK", 200
 
 @app.route('/health')
 def health():
-    """مسیر سلامت با حداقل خروجی"""
     return "alive", 200
 
 @app.route('/status')
 def status():
-    """مسیر وضعیت با حداقل خروجی"""
     return "running", 200
 
 def set_webhook():
     bot.remove_webhook()
     time.sleep(1)
     webhook_url = f"{BASE_URL}/webhook"
-    if bot.set_webhook(url=webhook_url):
-        logger.info(f"Webhook set to {webhook_url}")
+    # تنظیم secret token برای امنیت بیشتر
+    if bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET):
+        logger.info(f"Webhook set to {webhook_url} with secret token")
     else:
         logger.error("Webhook setting failed")
 
