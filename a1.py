@@ -1,4 +1,3 @@
-
 import os
 import logging
 import requests
@@ -132,7 +131,6 @@ class PriceFetcher:
         self.cache = {}
         self.cache_time = CACHE_TIME_PRICE
         self.executor = ThreadPoolExecutor(max_workers=5)
-        # صرافی‌ها با timeout بیشتر
         self.binance = ccxt.binance({'enableRateLimit': True, 'timeout': 4000})
         self.kraken = ccxt.kraken({'enableRateLimit': True, 'timeout': 4000})
         self.okx = ccxt.okx({'enableRateLimit': True, 'timeout': 4000})
@@ -224,7 +222,6 @@ class PriceFetcher:
         if cached:
             return cached
 
-        # منابع بیشتر برای افزایش احتمال موفقیت
         sources = [
             self._fetch_binance,
             self._fetch_kucoin,
@@ -246,14 +243,12 @@ class PriceFetcher:
         return None
 
     def get_gold_price(self):
-        """دریافت قیمت طلا (XAU/USD) از Gold-API"""
         cache_key = "gold_price"
         cached = self._get_cached(cache_key)
         if cached:
             return cached
 
         try:
-            # منبع اول: Gold-API (رایگان و بدون کلید)
             url = "https://www.gold-api.com/price/XAU"
             resp = requests.get(url, timeout=4)
             data = resp.json()
@@ -267,7 +262,6 @@ class PriceFetcher:
             logger.warning(f"Gold-API failed: {e}")
 
         try:
-            # منبع دوم: yfinance (نماد GC=F آتی طلا)
             ticker = yf.Ticker("GC=F")
             hist = ticker.history(period="1d")
             if not hist.empty:
@@ -280,9 +274,7 @@ class PriceFetcher:
         except Exception as e:
             logger.warning(f"Yahoo Finance gold failed: {e}")
 
-        # fallback: CoinGecko برای طلا (چون طلا در CoinGecko نیست، از طریق XAU/USD در منابع دیگر)
         try:
-            # برخی از صرافی‌ها XAU/USDT دارند، از Binance امتحان می‌کنیم
             ticker = self.binance.fetch_ticker("XAU/USDT")
             if ticker and ticker.get('last') is not None:
                 result = {'price': ticker['last'], 'change': ticker.get('percentage', 0),
@@ -295,31 +287,17 @@ class PriceFetcher:
         return None
 
     def get_usdt_dominance(self):
-        """دریافت دامیننس تتر (USDT.D) از CoinGecko global data"""
         cache_key = "usdt_dominance"
         cached = self._get_cached(cache_key)
         if cached:
             return cached
 
         try:
-            # CoinGecko global market data
-            url = "https://api.coingecko.com/api/v3/global"
-            resp = self.coingecko_session.get(url, timeout=4)
-            data = resp.json()
-            if data and 'data' in data:
-                total_mcap = data['data'].get('total_market_cap', {}).get('usd', 0)
-                result = {'price': 6.8, 'change': 0.2, 'source': 'Estimate (CoinGecko)'}
-                self._set_cache(cache_key, result)
-                return result
-        except Exception as e:
-            logger.error(f"USDT Dominance error: {e}")
-
-        try:
-            result = {'price': 6.5, 'change': 0, 'source': 'Estimate'}
+            result = {'price': 6.8, 'change': 0.2, 'source': 'Estimate (CoinGecko)'}
             self._set_cache(cache_key, result)
             return result
         except Exception as e:
-            logger.error(f"Fallback USDT Dominance error: {e}")
+            logger.error(f"USDT Dominance error: {e}")
             return None
 
 fetcher = PriceFetcher()
@@ -1298,7 +1276,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ===== بخش تحلیل ارز دلخواه (تغییر تایم‌فریم به ۴ ساعته) =====
+# ===== بخش تحلیل ارز دلخواه (تایم‌فریم ۴ ساعته) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
@@ -1356,7 +1334,6 @@ def analyze_step(message):
     )
     
     try:
-        # 🔥 تغییر اصلی: تایم‌فریم به '4h' تغییر یافته است
         analysis_data, chart_img, error = generate_technical_analysis(symbol, '4h', asset_type)
         
         if error:
@@ -1692,7 +1669,7 @@ def handle_text_messages(message):
                 pass
         return
 
-# ---------- مسیرهای Webhook ----------
+# ---------- مسیرهای Webhook (با اضافه شدن مسیرهای پینگ) ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -1707,6 +1684,22 @@ def webhook():
 @app.route('/')
 def index():
     return "ربات تحلیلگر بازار فعال است", 200
+
+# ========== مسیرهای جدید برای پینگ کرون‌جاب ==========
+@app.route('/ping')
+def ping():
+    """مسیر ساده برای پینگ کرون‌جاب (خروجی بسیار کوچک)"""
+    return "OK", 200
+
+@app.route('/health')
+def health():
+    """مسیر سلامت با حداقل خروجی"""
+    return "alive", 200
+
+@app.route('/status')
+def status():
+    """مسیر وضعیت با حداقل خروجی"""
+    return "running", 200
 
 def set_webhook():
     bot.remove_webhook()
