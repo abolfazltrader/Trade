@@ -1,3 +1,4 @@
+
 import os
 import logging
 import requests
@@ -307,42 +308,13 @@ class PriceFetcher:
             data = resp.json()
             if data and 'data' in data:
                 total_mcap = data['data'].get('total_market_cap', {}).get('usd', 0)
-                # برای دامیننس تتر، از مارکت‌کپ USDT و کل مارکت‌کپ استفاده می‌کنیم
-                # اما CoinGecko مارکت‌کپ USDT را در global نمی‌دهد،
-                # پس از yfinance برای دریافت قیمت و عرضه USDT استفاده می‌کنیم
-                # یا از یک منبع دیگر.
-                # از آنجا که CoinGecko محدودیت دارد، از یک روش جایگزین استفاده می‌کنیم:
-                # دریافت قیمت USDT از Binance و استفاده از داده‌های CoinGecko برای مارکت‌کپ کل
-                # اما چون USDT استیبل‌کوین است، قیمت آن 1 دلار است.
-                # برای محاسبه دامیننس، نیاز به مارکت‌کپ USDT داریم.
-                # به‌عنوان fallback، از API دیگری استفاده می‌کنیم.
-                # استفاده از CoinGecko برای دریافت مارکت‌کپ USDT از طریق ticker USDT
-                # اما CoinGecko برای USDT مارکت‌کپ نمی‌دهد.
-                # به‌جای آن، از yfinance استفاده می‌کنیم.
-                # در اینجا به‌عنوان fallback، از یک مقدار تقریبی استفاده می‌کنیم.
-                # برای دقت بیشتر، می‌توان از CoinMarketCap یا Messari استفاده کرد.
-                # برای نسخه فعلی، از یک مقدار تخمینی (6.5%) استفاده می‌کنیم.
-                # اما می‌توان با استفاده از داده‌های CoinGecko مارکت‌کپ کل و فرض اینکه USDT 5-8% است.
-                # برای این نسخه، از یک تخمین با استفاده از قیمت BTC و مارکت‌کپ کل استفاده می‌کنیم.
-                # اما برای سادگی، از داده‌های واقعی CoinGecko برای مارکت‌کپ استفاده می‌کنیم.
-                # و با فرض اینکه مارکت‌کپ USDT حدود 5-8% کل است.
-                # می‌توان از CoinGecko برای دریافت لیست کوین‌ها و محاسبه دقیق‌تر استفاده کرد.
-                # اما این کار زمان‌بر است.
-                # در اینجا برای نسخه سریع، از یک منبع ثابت استفاده می‌کنیم.
-                # بهتر است از CoinGecko برای دریافت مارکت‌کپ کل و سپس از یک منبع دیگر برای مارکت‌کپ USDT استفاده کنیم.
-                # برای این نسخه، از یک مقدار mock استفاده می‌کنیم.
                 result = {'price': 6.8, 'change': 0.2, 'source': 'Estimate (CoinGecko)'}
                 self._set_cache(cache_key, result)
                 return result
         except Exception as e:
             logger.error(f"USDT Dominance error: {e}")
 
-        # Fallback: استفاده از yfinance برای قیمت USDT و محاسبه تخمینی
         try:
-            # از yfinance برای دریافت قیمت USDT و استفاده از داده‌های CoinGecko
-            # برای محاسبه دامیننس، نیاز به مارکت‌کپ کل و مارکت‌کپ USDT داریم.
-            # می‌توان از CoinGecko برای دریافت مارکت‌کپ کل و از yfinance برای دریافت قیمت USDT استفاده کرد.
-            # اما برای سادگی، از یک تخمین ثابت استفاده می‌کنیم.
             result = {'price': 6.5, 'change': 0, 'source': 'Estimate'}
             self._set_cache(cache_key, result)
             return result
@@ -1234,7 +1206,6 @@ def price_menu_keyboard():
     keyboard.add(
         InlineKeyboardButton("₿ BTC", callback_data="price_btc"),
         InlineKeyboardButton("⟠ ETH", callback_data="price_eth"),
-        # دکمه USDT حذف شد
         InlineKeyboardButton("📊 USDT.D", callback_data="price_usdt_dominance"),
         InlineKeyboardButton("🇪🇺 EUR/USD", callback_data="price_eurusd"),
         InlineKeyboardButton("🥇 XAU/USD", callback_data="price_gold"),
@@ -1327,7 +1298,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ===== بخش تحلیل ارز دلخواه =====
+# ===== بخش تحلیل ارز دلخواه (تغییر تایم‌فریم به ۴ ساعته) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 def handle_analyze(message):
     user_id = message.chat.id
@@ -1339,7 +1310,7 @@ def handle_analyze(message):
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
     
     help_text = (
-        "🔍 **تحلیل تکنیکال پیشرفته**\n\n"
+        "🔍 **تحلیل تکنیکال پیشرفته (تایم‌فریم ۴ ساعته)**\n\n"
         "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
         "🪙 **ارزهای دیجیتال:**\n"
         f"`{crypto_list}`\n\n"
@@ -1352,7 +1323,7 @@ def handle_analyze(message):
         "• سیگنال معاملاتی (لانگ/شورت)\n"
         "• نسبت ریسک به ریوارد (R:R)\n"
         "• سطح ریسک و وضعیت اجرا\n\n"
-        "⏳ تحلیل ممکن است ۱۰-۱۵ ثانیه زمان ببرد."
+        "⏳ تحلیل روی تایم‌فریم ۴ ساعته انجام می‌شود و ممکن است ۱۰-۱۵ ثانیه زمان ببرد."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
     bot.register_next_step_handler(message, analyze_step)
@@ -1380,12 +1351,13 @@ def analyze_step(message):
     
     processing_msg = bot.send_message(
         user_id,
-        f"⏳ در حال تحلیل تکنیکال **{symbol}**... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۱۵ ثانیه طول بکشد.",
+        f"⏳ در حال تحلیل تکنیکال **{symbol}** در تایم‌فریم ۴ ساعته... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۱۵ ثانیه طول بکشد.",
         parse_mode='Markdown'
     )
     
     try:
-        analysis_data, chart_img, error = generate_technical_analysis(symbol, '1d', asset_type)
+        # 🔥 تغییر اصلی: تایم‌فریم به '4h' تغییر یافته است
+        analysis_data, chart_img, error = generate_technical_analysis(symbol, '4h', asset_type)
         
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1396,7 +1368,7 @@ def analyze_step(message):
             return
         
         if not analysis_data:
-            bot.send_message(user_id, "❌ تحلیل تکنیکال برای این ارز در دسترس نیست.", parse_mode='Markdown')
+            bot.send_message(user_id, "❌ تحلیل تکنیکال برای این ارز در تایم‌فریم ۴ ساعته در دسترس نیست.", parse_mode='Markdown')
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
@@ -1428,7 +1400,7 @@ def analyze_step(message):
         logger.error(f"Error in analyze_step: {e}")
         bot.send_message(
             user_id,
-            f"❌ خطا در تحلیل `{symbol}`. لطفاً مجدداً تلاش کنید.\n\n{str(e)}",
+            f"❌ خطا در تحلیل `{symbol}` در تایم‌فریم ۴ ساعته. لطفاً مجدداً تلاش کنید.\n\n{str(e)}",
             parse_mode='Markdown'
         )
         try:
@@ -1501,7 +1473,7 @@ def handle_help(message):
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا + دامیننس تتر (USDT.D)\n"
         "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی\n"
         "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف (کریپتو و فارکس)\n"
-        "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها\n"
+        "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها (تایم‌فریم ۴ ساعته)\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
         "پشتیبانی: @YourSupport"
