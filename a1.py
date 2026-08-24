@@ -49,7 +49,7 @@ waiting_for_signal = {}
 # ========== بهینه‌سازی کش ==========
 CACHE_TIME_PRICE = 300
 CACHE_TIME_HISTORICAL = 600
-CACHE_TIME_NEWS = 300
+CACHE_TIME_NEWS = 300  # ۵ دقیقه کش برای اخبار
 
 # ========== نگاشت تایم‌فریم‌ها ==========
 TIMEFRAME_MAP = {
@@ -849,25 +849,39 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار (با مدیریت خطا) ==========
+# ========== توابع اخبار (با چندین منبع و بهبود تحلیل احساسات) ==========
+
 def analyze_sentiment_detailed(text):
+    """تحلیل عمیق‌تر احساسات با کلمات کلیدی گسترده (ورودی انگلیسی)"""
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
         "record", "high", "upgrade", "profit", "success", "breakthrough", "jump", "soar", "climb",
         "recovery", "rebound", "outperform", "beat", "exceed", "milestone", "adoption", "approval",
         "launch", "partnership", "integration", "investment", "funding", "inflow", "accumulation",
-        "buy", "long", "support", "resistance", "breakout"
+        "buy", "long", "support", "resistance", "breakout", "green", "moon", "skyrocket", "bull",
+        "optimistic", "hope", "promising", "potential", "opportunity", "win", "victory", "successful",
+        "break", "surpass", "all-time", "peak", "highest", "new", "upward", "momentum", "strength"
     ]
     negative_words = [
         "drop", "fall", "decline", "negative", "bearish", "slump", "weak", "loss", "plunge", "slip",
         "crash", "reject", "fraud", "hack", "ban", "scam", "warning", "risk", "sell", "short",
         "correction", "dump", "withdrawal", "outflow", "deficit", "default", "fail", "delay",
-        "restriction", "investigation", "fine", "penalty", "lawsuit", "panic", "fear"
+        "restriction", "investigation", "fine", "penalty", "lawsuit", "panic", "fear", "red",
+        "bear", "down", "lower", "declining", "struggle", "trouble", "concern", "uncertainty",
+        "volatility", "crash", "collapse", "plummet", "tumble", "sliding", "bleed", "bloodbath"
     ]
     text_lower = text.lower()
     pos = sum(1 for w in positive_words if w in text_lower)
     neg = sum(1 for w in negative_words if w in text_lower)
-    if pos > neg:
+    
+    # امتیازدهی دقیق‌تر
+    if pos > neg + 1:
+        return 'positive'
+    elif neg > pos + 1:
+        return 'negative'
+    elif pos == 0 and neg == 0:
+        return 'neutral'
+    elif pos > neg:
         return 'positive'
     elif neg > pos:
         return 'negative'
@@ -875,13 +889,16 @@ def analyze_sentiment_detailed(text):
         return 'neutral'
 
 def build_detailed_news_message(symbol, all_news_items, source_names):
+    """ساخت پیام نهایی اخبار با دسته‌بندی مثبت، منفی و خنثی"""
     if not all_news_items:
         return f"❌ هیچ خبری برای `{symbol}` از منابع {', '.join(source_names)} یافت نشد."
     
+    # دسته‌بندی بر اساس sentiment
     positive = [n for n in all_news_items if n['sentiment'] == 'positive']
     negative = [n for n in all_news_items if n['sentiment'] == 'negative']
     neutral = [n for n in all_news_items if n['sentiment'] == 'neutral']
     
+    # اگر بخش مثبت یا منفی خالی بود، از اخبار خنثی برای پر کردن استفاده کن
     if not positive and neutral:
         positive = neutral[:2]
     if not negative and neutral:
@@ -894,20 +911,23 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     if total == 0:
         return f"📭 هیچ خبر مرتبطی برای `{symbol}` پیدا نشد."
     
+    # ---------- ساخت بخش اخبار مثبت ----------
     text = f"✅🗞 **اخبار مثبت ({pos_count} خبر):**\n"
     if positive:
-        for item in positive[:5]:
+        for item in positive[:5]:  # حداکثر ۵ خبر مثبت
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
     
+    # ---------- بخش اخبار منفی ----------
     text += f"\n❌🗞 **اخبار منفی ({neg_count} خبر):**\n"
     if negative:
-        for item in negative[:3]:
+        for item in negative[:3]:  # حداکثر ۳ خبر منفی
             text += f"- {item['title']}\n"
     else:
         text += "- —\n"
     
+    # ---------- تحلیل ----------
     text += "\n📝 **تحلیل:**\n"
     if pos_count > neg_count:
         analysis = f"- اخبار مثبت به طور قابل توجهی بر اخبار منفی غلبه دارند.\n"
@@ -935,6 +955,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     analysis += f"- اخبار از منابع {', '.join(source_names)} جمع‌آوری شده‌اند.\n"
     text += analysis
     
+    # ---------- سنتیمنت بازار ----------
     if pos_count > neg_count:
         sentiment = "🐂 **صعودی**"
         trade_result = "✅ خرید محتاطانه — با توجه به سیگنال‌های صعودی قوی و اخبار مثبت متعدد."
@@ -948,6 +969,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
         trade_result = "⏳ انتظار — بدون سیگنال واضح، منتظر محرک جدید باشید."
         overall = "⚪ خنثی"
     
+    # ---------- اطمینان ----------
     if total >= 6:
         confidence = "بالا — اخبار متعدد و هم‌جهت، با پوشش رسانه‌ای گسترده."
     elif total >= 4:
@@ -960,14 +982,24 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     text += f"💡 **نتیجه معاملاتی:** {trade_result}\n"
     text += f"🔎 **اطمینان:** {confidence}\n"
     text += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | ربات تحلیلگر اخبار"
+    
     return text
 
+# ----- منابع دریافت اخبار (بهبود یافته) -----
+
 def fetch_cryptopanic(symbol, limit=8):
+    """دریافت اخبار از CryptoPanic (رایگان، بدون کلید)"""
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
-        params = {'auth_token': '', 'currencies': symbol.lower(), 'kind': 'news', 'public': 'true', 'filter': 'hot'}
+        params = {
+            'auth_token': '',
+            'currencies': symbol.lower(),
+            'kind': 'news',
+            'public': 'true',
+            'filter': 'hot'
+        }
         headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
-        response = requests.get(url, params=params, headers=headers, timeout=8)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             logger.warning(f"CryptoPanic status {response.status_code}")
             return None
@@ -992,10 +1024,11 @@ def fetch_cryptopanic(symbol, limit=8):
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'CryptoPanic'})
         return news_items
     except Exception as e:
-        logger.error(f"CryptoPanic error: {e}")
+        logger.error(f"CryptoPanic error for {symbol}: {e}")
         return None
 
 def fetch_bing_news(symbol, limit=8, market='crypto'):
+    """دریافت اخبار از Bing News RSS"""
     try:
         if market == 'crypto':
             query = f"{symbol} cryptocurrency news"
@@ -1004,7 +1037,7 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
         encoded_query = quote(query)
         rss_url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(rss_url, headers=headers, timeout=8)
+        response = requests.get(rss_url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -1019,6 +1052,9 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
+            # اگر عنوان فارسی خالی بود، از عنوان انگلیسی استفاده کن
+            if not title_fa or title_fa == title_en:
+                title_fa = title_en
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Bing News'})
         return news_items
     except Exception as e:
@@ -1026,6 +1062,7 @@ def fetch_bing_news(symbol, limit=8, market='crypto'):
         return None
 
 def fetch_google_news(symbol, limit=8, market='crypto'):
+    """دریافت اخبار از Google News RSS"""
     try:
         if market == 'crypto':
             query = f"{symbol} cryptocurrency"
@@ -1034,7 +1071,7 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
         encoded_query = quote(query)
         rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(rss_url, headers=headers, timeout=8)
+        response = requests.get(rss_url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -1049,6 +1086,8 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
+            if not title_fa or title_fa == title_en:
+                title_fa = title_en
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Google News'})
         return news_items
     except Exception as e:
@@ -1056,10 +1095,11 @@ def fetch_google_news(symbol, limit=8, market='crypto'):
         return None
 
 def fetch_investing_news(symbol, limit=8):
+    """دریافت اخبار فارکس از Investing.com RSS"""
     try:
         rss_url = "https://www.investing.com/rss/news_forex.rss"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(rss_url, headers=headers, timeout=8)
+        response = requests.get(rss_url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
         root = ET.fromstring(response.content)
@@ -1071,11 +1111,14 @@ def fetch_investing_news(symbol, limit=8):
             title_elem = item.find('title')
             link_elem = item.find('link')
             title_en = title_elem.text if title_elem is not None else "بدون عنوان"
+            # فیلتر بر اساس نماد
             if symbol.upper() not in title_en.upper():
                 continue
             title_fa = translate_to_persian(title_en)
             link = link_elem.text if link_elem is not None else "#"
             sentiment = analyze_sentiment_detailed(title_en)
+            if not title_fa or title_fa == title_en:
+                title_fa = title_en
             news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'Investing.com'})
             if len(news_items) >= limit:
                 break
@@ -1084,75 +1127,123 @@ def fetch_investing_news(symbol, limit=8):
         logger.error(f"Investing.com error for {symbol}: {e}")
         return None
 
+def fetch_coindesk_news(symbol, limit=8):
+    """دریافت اخبار از CoinDesk RSS (برای کریپتو)"""
+    try:
+        rss_url = "https://www.coindesk.com/arc/outboundfeeds/rss/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(rss_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')
+        if not items:
+            return None
+        news_items = []
+        for item in items[:limit]:
+            title_elem = item.find('title')
+            link_elem = item.find('link')
+            title_en = title_elem.text if title_elem is not None else "بدون عنوان"
+            # فیلتر بر اساس نماد
+            if symbol.upper() not in title_en.upper():
+                continue
+            title_fa = translate_to_persian(title_en)
+            link = link_elem.text if link_elem is not None else "#"
+            sentiment = analyze_sentiment_detailed(title_en)
+            if not title_fa or title_fa == title_en:
+                title_fa = title_en
+            news_items.append({'title': title_fa, 'link': link, 'sentiment': sentiment, 'source': 'CoinDesk'})
+            if len(news_items) >= limit:
+                break
+        return news_items if news_items else None
+    except Exception as e:
+        logger.error(f"CoinDesk error for {symbol}: {e}")
+        return None
+
+# ----- تابع اصلی دریافت اخبار کریپتو (با چندین منبع) -----
 def get_crypto_news(symbol, limit=8):
     all_news = []
     sources_used = []
-    try:
-        items = fetch_cryptopanic(symbol, limit)
-        if items:
-            all_news.extend(items)
-            sources_used.append('CryptoPanic')
-    except Exception as e:
-        logger.warning(f"CryptoPanic failed: {e}")
-    try:
-        items = fetch_bing_news(symbol, limit, 'crypto')
-        if items:
-            all_news.extend(items)
-            sources_used.append('Bing News')
-    except Exception as e:
-        logger.warning(f"Bing News failed: {e}")
-    try:
-        items = fetch_google_news(symbol, limit, 'crypto')
-        if items:
-            all_news.extend(items)
-            sources_used.append('Google News')
-    except Exception as e:
-        logger.warning(f"Google News failed: {e}")
+    
+    # لیست منابع با ترتیب اولویت
+    sources = [
+        ('CryptoPanic', fetch_cryptopanic, symbol, limit),
+        ('Bing News', fetch_bing_news, symbol, limit, 'crypto'),
+        ('Google News', fetch_google_news, symbol, limit, 'crypto'),
+        ('CoinDesk', fetch_coindesk_news, symbol, limit)
+    ]
+    
+    for source_name, func, *args in sources:
+        try:
+            items = func(*args)
+            if items:
+                all_news.extend(items)
+                sources_used.append(source_name)
+                # اگر تعداد اخبار کافی است، ادامه نده
+                if len(all_news) >= limit * 2:
+                    break
+        except Exception as e:
+            logger.warning(f"Source {source_name} failed for {symbol}: {e}")
+            continue
+    
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
+    
+    # حذف تکراری‌ها (بر اساس عنوان)
     seen_titles = set()
     unique_news = []
     for item in all_news:
         if item['title'] not in seen_titles:
             seen_titles.add(item['title'])
             unique_news.append(item)
+    
+    # اگر منبع‌های معتبری استفاده نشده‌اند، از نام منابع استفاده کن
+    if not sources_used:
+        sources_used = ['منابع مختلف']
+    
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
+# ----- تابع اصلی دریافت اخبار فارکس (با چندین منبع) -----
 def get_forex_news(symbol, limit=8):
     all_news = []
     sources_used = []
-    try:
-        items = fetch_investing_news(symbol, limit)
-        if items:
-            all_news.extend(items)
-            sources_used.append('Investing.com')
-    except Exception as e:
-        logger.warning(f"Investing.com failed: {e}")
-    try:
-        items = fetch_bing_news(symbol, limit, 'forex')
-        if items:
-            all_news.extend(items)
-            sources_used.append('Bing News')
-    except Exception as e:
-        logger.warning(f"Bing News failed: {e}")
-    try:
-        items = fetch_google_news(symbol, limit, 'forex')
-        if items:
-            all_news.extend(items)
-            sources_used.append('Google News')
-    except Exception as e:
-        logger.warning(f"Google News failed: {e}")
+    
+    sources = [
+        ('Investing.com', fetch_investing_news, symbol, limit),
+        ('Bing News', fetch_bing_news, symbol, limit, 'forex'),
+        ('Google News', fetch_google_news, symbol, limit, 'forex')
+    ]
+    
+    for source_name, func, *args in sources:
+        try:
+            items = func(*args)
+            if items:
+                all_news.extend(items)
+                sources_used.append(source_name)
+                if len(all_news) >= limit * 2:
+                    break
+        except Exception as e:
+            logger.warning(f"Source {source_name} failed for {symbol}: {e}")
+            continue
+    
     if not all_news:
         return f"❌ هیچ خبری برای `{symbol}` از هیچ منبعی یافت نشد. لطفاً بعداً تلاش کنید."
+    
     seen_titles = set()
     unique_news = []
     for item in all_news:
         if item['title'] not in seen_titles:
             seen_titles.add(item['title'])
             unique_news.append(item)
+    
+    if not sources_used:
+        sources_used = ['منابع مختلف']
+    
     return build_detailed_news_message(symbol, unique_news, sources_used)
 
+# ----- کش برای اخبار (زمان اعتبار ۵ دقیقه) -----
 news_cache = {}
+
 def get_cached_news(symbol, limit=8, is_crypto=True):
     cache_key = f"{'crypto' if is_crypto else 'forex'}_{symbol}_{limit}"
     if cache_key in news_cache:
@@ -1271,7 +1362,7 @@ def handle_news(message):
         "• سنتیمنت کلی بازار\n"
         "• نتیجه معاملاتی (خرید/فروش/انتظار)\n"
         "• سطح اطمینان تحلیل\n\n"
-        "⏳ اخبار هر ۵ دقیقه به‌روزرسانی می‌شود.\n"
+        "⏳ اخبار از چندین منبع معتبر (CryptoPanic, Bing, Google, CoinDesk) دریافت می‌شود.\n"
         "💰 نمایش اخبار **رایگان** است."
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
@@ -1448,7 +1539,7 @@ def handle_help(message):
     help_text = (
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا + دامیننس تتر (USDT.D)\n"
-        "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی\n"
+        "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی (از چندین منبع معتبر)\n"
         "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف (کریپتو و فارکس)\n"
         "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها (تایم‌فریم ۴ ساعته)\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
