@@ -55,8 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------- Rate Limiter ----------
-rate_limit_store = {}  # {user_id: [timestamps]}
-rate_limit_lock = None  # برای سادگی از threading.Lock استفاده می‌کنیم
+rate_limit_store = {}
 import threading
 rate_limit_lock = threading.Lock()
 
@@ -66,7 +65,6 @@ def is_rate_limited(user_id):
     with rate_limit_lock:
         if user_id not in rate_limit_store:
             rate_limit_store[user_id] = []
-        # حذف زمان‌های قدیمی‌تر از دوره
         rate_limit_store[user_id] = [t for t in rate_limit_store[user_id] if now - t < RATE_LIMIT_PERIOD]
         if len(rate_limit_store[user_id]) >= RATE_LIMIT_REQUESTS:
             return True
@@ -148,12 +146,11 @@ def safe_symbol(symbol):
     if not symbol:
         return None
     symbol = symbol.strip().upper()
-    # فقط حروف، اعداد و اسلش مجاز
     if not re.match(r'^[A-Z0-9/]+$', symbol):
         return None
     return symbol
 
-# ========== سیستم دریافت قیمت (بدون تغییر امنیتی خاص) ==========
+# ========== سیستم دریافت قیمت (بدون تغییر) ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
@@ -330,7 +327,6 @@ class PriceFetcher:
 
 fetcher = PriceFetcher()
 
-# ---------- توابع عمومی دریافت قیمت (بدون تغییر) ----------
 def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
@@ -413,7 +409,7 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ---------- توابع ترجمه (بدون تغییر) ----------
+# ---------- توابع ترجمه ----------
 translation_cache = {}
 
 def translate_to_persian(text):
@@ -482,9 +478,6 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== دریافت داده‌های تاریخی فارکس ==========
-forex_cache = {}
-
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
     tf_map = {
         '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
@@ -533,7 +526,9 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         logger.error(f"Error fetching forex data for {symbol}: {e}")
         return None
 
-# ========== توابع تحلیل تکنیکال (بدون تغییر) ==========
+forex_cache = {}
+
+# ========== توابع تحلیل تکنیکال ==========
 def calculate_indicators(data):
     df = pd.DataFrame({
         'high': data['high'],
@@ -877,7 +872,7 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار (بدون تغییر) ==========
+# ========== توابع اخبار ==========
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -1287,6 +1282,17 @@ ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
 waiting_for_symbol = {}
 waiting_for_signal = {}
 
+# ========== دکمه‌های جدید برای طلا و دلار ==========
+def gold_forex_menu_keyboard():
+    keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn_gold_analysis = KeyboardButton("📊 تحلیل طلا")
+    btn_forex_analysis = KeyboardButton("📊 تحلیل دلار")
+    btn_gold_price = KeyboardButton("💰 قیمت طلا")
+    btn_forex_price = KeyboardButton("💰 قیمت دلار")
+    btn_back = KeyboardButton("🔙 برگشت به منو")
+    keyboard.add(btn_gold_analysis, btn_forex_analysis, btn_gold_price, btn_forex_price, btn_back)
+    return keyboard
+
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -1295,9 +1301,10 @@ def main_menu_keyboard():
     btn_signal = KeyboardButton("📈 سیگنال معاملاتی")
     btn_analyze = KeyboardButton("🔍 تحلیل ارز دلخواه")
     btn_suggest = KeyboardButton("🎯 پیشنهاد خرید")
+    btn_gold_forex = KeyboardButton("💰 تحلیل و قیمت طلا و دلار")
     btn_panel = KeyboardButton("👤 پنل کاربری")
     btn_help = KeyboardButton("ℹ️ راهنما")
-    keyboard.add(btn_price, btn_news, btn_signal, btn_analyze, btn_suggest, btn_panel, btn_help)
+    keyboard.add(btn_price, btn_news, btn_signal, btn_analyze, btn_suggest, btn_gold_forex, btn_panel, btn_help)
     return keyboard
 
 def price_menu_keyboard():
@@ -1327,6 +1334,111 @@ def rate_limited_handler(func):
             return
         return func(message)
     return wrapper
+
+# ---------- توابع دریافت قیمت از بیت‌پین ----------
+def get_bitpin_price(symbol):
+    """دریافت قیمت لحظه‌ای از صرافی بیت‌پین برای جفت‌ارزهای USDTIRT, USDIRT, EURIRT"""
+    try:
+        url = f"https://api.bitpin.ir/api/v1/market/ticker/?symbol={symbol}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and 'ticker' in data:
+                ticker = data['ticker']
+                price = float(ticker.get('last', 0))
+                change = float(ticker.get('change', 0))
+                return {'price': price, 'change': change}
+    except Exception as e:
+        logger.error(f"Bitpin error for {symbol}: {e}")
+    return None
+
+def get_bitpin_prices():
+    """دریافت قیمت دلار، یورو و تتر از بیت‌پین"""
+    symbols = {
+        'USDTIRT': 'تتر',
+        'USDIRT': 'دلار',
+        'EURIRT': 'یورو'
+    }
+    result = {}
+    for sym, name in symbols.items():
+        data = get_bitpin_price(sym)
+        if data:
+            result[name] = data
+    return result
+
+# ---------- توابع دریافت قیمت طلا از tgju.org ----------
+def get_gold_prices_from_tgju():
+    """دریافت قیمت‌های طلا و سکه از tgju.org"""
+    try:
+        url = "https://api.tgju.org/v1/market/price/"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'success' and 'data' in data:
+                items = data['data']
+                gold_items = {}
+                for item in items:
+                    key = item.get('key')
+                    if key in ['sale_emami', 'sale_bahar', 'ons_gold', 'gold_24', 'gold_18']:
+                        gold_items[key] = {
+                            'price': item.get('price'),
+                            'change': item.get('change'),
+                            'change_percent': item.get('change_percent'),
+                            'updated_at': item.get('updated_at')
+                        }
+                return gold_items
+    except Exception as e:
+        logger.error(f"Tgju error: {e}")
+    return None
+
+def format_gold_price_message(gold_data):
+    if not gold_data:
+        return "❌ دریافت قیمت طلا ممکن نیست. لطفاً بعداً تلاش کنید."
+
+    names = {
+        'sale_emami': 'سکه امامي',
+        'sale_bahar': 'سکه بهار آزادی',
+        'ons_gold': 'انس طلا',
+        'gold_24': 'طلا 24 عیار',
+        'gold_18': 'طلا 18 عیار'
+    }
+
+    msg = "💰 **قیمت‌های لحظه‌ای طلا و سکه**\n\n"
+    for key, name in names.items():
+        if key in gold_data:
+            item = gold_data[key]
+            price = item['price']
+            change = item['change']
+            change_percent = item['change_percent']
+            updated = item['updated_at']
+            if price is not None:
+                if key == 'ons_gold':
+                    price_str = f"{price:,.2f}"
+                    change_str = f"{change:+.2f}" if change else "0"
+                else:
+                    price_str = f"{int(price):,}"
+                    change_str = f"{int(change):+,}" if change else "0"
+                msg += f"**{name}**\n"
+                msg += f"قیمت: {price_str}\n"
+                if change is not None:
+                    msg += f"تغییر: (%{change_percent:+.2f}) {change_str}\n"
+                msg += f"آخرین به‌روزرسانی: {updated}\n\n"
+    msg += "🔄 قیمت‌ها هر ۱۰ دقیقه به‌روزرسانی می‌شوند."
+    return msg
+
+def format_forex_price_message(forex_data):
+    if not forex_data:
+        return "❌ دریافت قیمت ارز ممکن نیست. لطفاً بعداً تلاش کنید."
+
+    msg = "💰 **قیمت‌های لحظه‌ای ارز**\n\n"
+    for name, data in forex_data.items():
+        price = data['price']
+        change = data['change']
+        msg += f"**{name}**\n"
+        msg += f"قیمت: {price:,.0f}\n"
+        msg += f"تغییر: (%{change:+.2f}) {change:+,.0f}\n\n"
+    msg += "🔄 قیمت‌ها هر ۱۰ دقیقه به‌روزرسانی می‌شوند."
+    return msg
 
 # ---------- دستورات و هندلرها ----------
 @bot.message_handler(commands=['start'])
@@ -1597,10 +1709,134 @@ def handle_help(message):
         "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف (کریپتو و فارکس)\n"
         "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها (تایم‌فریم ۴ ساعته)\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
+        "💰 تحلیل و قیمت طلا و دلار: مشاهده قیمت‌های لحظه‌ای و تحلیل تکنیکال طلا و دلار\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
         "پشتیبانی: @YourSupport"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+# ========== هندلرهای جدید برای طلا و دلار ==========
+@bot.message_handler(func=lambda msg: msg.text == "💰 تحلیل و قیمت طلا و دلار")
+@rate_limited_handler
+def handle_gold_forex_menu(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    bot.send_message(user_id, "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=gold_forex_menu_keyboard())
+
+@bot.message_handler(func=lambda msg: msg.text == "💰 قیمت طلا")
+@rate_limited_handler
+def handle_gold_price(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    processing_msg = bot.send_message(user_id, "⏳ دریافت قیمت طلا... لطفاً صبر کنید.")
+    gold_data = get_gold_prices_from_tgju()
+    if gold_data:
+        msg = format_gold_price_message(gold_data)
+        bot.send_message(user_id, msg, parse_mode='Markdown')
+    else:
+        bot.send_message(user_id, "❌ در دریافت قیمت طلا خطا رخ داد. لطفاً بعداً تلاش کنید.")
+    try:
+        bot.delete_message(user_id, processing_msg.message_id)
+    except:
+        pass
+
+@bot.message_handler(func=lambda msg: msg.text == "💰 قیمت دلار")
+@rate_limited_handler
+def handle_forex_price(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    processing_msg = bot.send_message(user_id, "⏳ دریافت قیمت ارز... لطفاً صبر کنید.")
+    forex_data = get_bitpin_prices()
+    if forex_data:
+        msg = format_forex_price_message(forex_data)
+        bot.send_message(user_id, msg, parse_mode='Markdown')
+    else:
+        bot.send_message(user_id, "❌ در دریافت قیمت ارز خطا رخ داد. لطفاً بعداً تلاش کنید.")
+    try:
+        bot.delete_message(user_id, processing_msg.message_id)
+    except:
+        pass
+
+@bot.message_handler(func=lambda msg: msg.text == "📊 تحلیل طلا")
+@rate_limited_handler
+def handle_gold_analysis(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل طلا (XAU/USD) در تایم‌فریم روزانه... لطفاً صبر کنید.")
+    try:
+        # تحلیل طلا با نماد XAU/USD
+        analysis_data, chart_img, error = generate_technical_analysis("XAU/USD", '1d', 'crypto')
+        if error:
+            bot.send_message(user_id, error, parse_mode='Markdown')
+        elif not analysis_data:
+            bot.send_message(user_id, "❌ تحلیل طلا در دسترس نیست.", parse_mode='Markdown')
+        else:
+            msg = format_analysis_message(analysis_data)
+            if chart_img:
+                bot.send_photo(user_id, chart_img, caption=msg, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Gold analysis error: {e}")
+        bot.send_message(user_id, "❌ خطا در تحلیل طلا. لطفاً مجدداً تلاش کنید.")
+    try:
+        bot.delete_message(user_id, processing_msg.message_id)
+    except:
+        pass
+
+@bot.message_handler(func=lambda msg: msg.text == "📊 تحلیل دلار")
+@rate_limited_handler
+def handle_forex_analysis(message):
+    user_id = message.chat.id
+    if is_user_expired(user_id):
+        bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
+        return
+    processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل دلار (USD/IRT)... لطفاً صبر کنید.")
+    try:
+        forex_data = get_bitpin_prices()
+        if forex_data and 'دلار' in forex_data:
+            usd = forex_data['دلار']
+            price = usd['price']
+            change = usd['change']
+            if change > 0:
+                trend = "صعودی"
+                suggestion = "احتمال ادامه رشد وجود دارد."
+            elif change < 0:
+                trend = "نزولی"
+                suggestion = "احتمال کاهش قیمت وجود دارد."
+            else:
+                trend = "خنثی"
+                suggestion = "قیمت بدون تغییر است."
+            msg = f"📊 **تحلیل دلار**\n\n"
+            msg += f"💰 قیمت فعلی: {price:,.0f} ریال\n"
+            msg += f"📈 تغییر ۲۴ ساعته: {change:+.2f}%\n"
+            msg += f"📉 روند کلی: {trend}\n"
+            msg += f"💡 پیشنهاد: {suggestion}\n\n"
+            msg += "این تحلیل بر اساس قیمت لحظه‌ای و تغییرات روزانه است و توصیه معاملاتی محسوب نمی‌شود."
+            bot.send_message(user_id, msg, parse_mode='Markdown')
+        else:
+            bot.send_message(user_id, "❌ دریافت قیمت دلار ممکن نیست.")
+    except Exception as e:
+        logger.error(f"Forex analysis error: {e}")
+        bot.send_message(user_id, "❌ خطا در تحلیل دلار. لطفاً مجدداً تلاش کنید.")
+    try:
+        bot.delete_message(user_id, processing_msg.message_id)
+    except:
+        pass
+
+@bot.message_handler(func=lambda msg: msg.text == "🔙 برگشت به منو")
+@rate_limited_handler
+def handle_back_to_main(message):
+    user_id = message.chat.id
+    bot.send_message(user_id, "به منوی اصلی برگشتید.", reply_markup=main_menu_keyboard())
 
 # ---------- هندلرهای کالبک قیمت ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("price_"))
@@ -1852,7 +2088,6 @@ def set_webhook():
     bot.remove_webhook()
     time.sleep(1)
     webhook_url = f"{BASE_URL}/webhook"
-    # تنظیم secret token برای امنیت بیشتر
     if bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET):
         logger.info(f"Webhook set to {webhook_url} with secret token")
     else:
