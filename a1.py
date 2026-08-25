@@ -1335,25 +1335,48 @@ def rate_limited_handler(func):
         return func(message)
     return wrapper
 
-# ---------- توابع دریافت قیمت از بیت‌پین ----------
+# ================================================================
+# ========== توابع دریافت قیمت اصلاح‌شده ==========
+# ================================================================
+
+# --- دریافت قیمت از بیت‌پین با پشتیبانی از دو فرمت آدرس و retry ---
 def get_bitpin_price(symbol):
-    """دریافت قیمت لحظه‌ای از صرافی بیت‌پین برای جفت‌ارزهای USDTIRT, USDIRT, EURIRT"""
-    try:
-        url = f"https://api.bitpin.ir/api/v1/market/ticker/?symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and 'ticker' in data:
-                ticker = data['ticker']
-                price = float(ticker.get('last', 0))
-                change = float(ticker.get('change', 0))
-                return {'price': price, 'change': change}
-    except Exception as e:
-        logger.error(f"Bitpin error for {symbol}: {e}")
+    """دریافت قیمت لحظه‌ای از صرافی بیت‌پین با دو روش مختلف"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    urls = [
+        f"https://api.bitpin.ir/api/v1/market/ticker/?symbol={symbol}",
+        f"https://api.bitpin.ir/api/v1/market/ticker/{symbol}/"
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ساختار پاسخ ممکن است متفاوت باشد: گاهی ticker در data است، گاهی مستقیم
+                ticker = data.get('ticker')
+                if not ticker:
+                    # ممکن است پاسخ مستقیم باشد
+                    ticker = data
+                if ticker and ticker.get('last') is not None:
+                    price = float(ticker['last'])
+                    change = float(ticker.get('change', 0))
+                    return {'price': price, 'change': change}
+            else:
+                logger.warning(f"Bitpin {url} returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Bitpin error for {symbol} with {url}: {e}")
+            continue
     return None
 
 def get_bitpin_prices():
-    """دریافت قیمت دلار، یورو و تتر از بیت‌پین"""
+    """دریافت قیمت دلار، یورو و تتر از بیت‌پین با کش"""
+    cache_key = "bitpin_prices"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
+
     symbols = {
         'USDTIRT': 'تتر',
         'USDIRT': 'دلار',
@@ -1364,33 +1387,57 @@ def get_bitpin_prices():
         data = get_bitpin_price(sym)
         if data:
             result[name] = data
+        else:
+            logger.warning(f"Could not fetch {name} from Bitpin")
+    if result:
+        fetcher._set_cache(cache_key, result)
     return result
 
-# ---------- توابع دریافت قیمت طلا از tgju.org ----------
+# --- دریافت قیمت طلا از tgju.org با بهبود retry و هدر ---
 def get_gold_prices_from_tgju():
-    """دریافت قیمت‌های طلا و سکه از tgju.org"""
-    try:
-        url = "https://api.tgju.org/v1/market/price/"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('status') == 'success' and 'data' in data:
-                items = data['data']
-                gold_items = {}
-                for item in items:
-                    key = item.get('key')
-                    if key in ['sale_emami', 'sale_bahar', 'ons_gold', 'gold_24', 'gold_18']:
-                        gold_items[key] = {
-                            'price': item.get('price'),
-                            'change': item.get('change'),
-                            'change_percent': item.get('change_percent'),
-                            'updated_at': item.get('updated_at')
-                        }
-                return gold_items
-    except Exception as e:
-        logger.error(f"Tgju error: {e}")
+    """دریافت قیمت‌های طلا و سکه از tgju.org با هدر مناسب"""
+    cache_key = "tgju_gold_prices"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
+
+    url = "https://api.tgju.org/v1/market/price/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success' and 'data' in data:
+                    items = data['data']
+                    gold_items = {}
+                    for item in items:
+                        key = item.get('key')
+                        if key in ['sale_emami', 'sale_bahar', 'ons_gold', 'gold_24', 'gold_18']:
+                            gold_items[key] = {
+                                'price': item.get('price'),
+                                'change': item.get('change'),
+                                'change_percent': item.get('change_percent'),
+                                'updated_at': item.get('updated_at')
+                            }
+                    if gold_items:
+                        fetcher._set_cache(cache_key, gold_items)
+                        return gold_items
+                    else:
+                        logger.warning("No valid gold items in response")
+                else:
+                    logger.warning(f"tgju response status not success: {data.get('status')}")
+            else:
+                logger.warning(f"tgju returned status {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"tgju attempt {attempt+1} failed: {e}")
+        time.sleep(1)
     return None
 
+# --- توابع فرمت‌دهی پیام (بدون تغییر) ---
 def format_gold_price_message(gold_data):
     if not gold_data:
         return "❌ دریافت قیمت طلا ممکن نیست. لطفاً بعداً تلاش کنید."
@@ -1423,6 +1470,8 @@ def format_gold_price_message(gold_data):
                 if change is not None:
                     msg += f"تغییر: (%{change_percent:+.2f}) {change_str}\n"
                 msg += f"آخرین به‌روزرسانی: {updated}\n\n"
+    if len(msg.strip()) == len("💰 **قیمت‌های لحظه‌ای طلا و سکه**\n\n"):
+        return "❌ داده‌های قیمت طلا موجود نیست."
     msg += "🔄 قیمت‌ها هر ۱۰ دقیقه به‌روزرسانی می‌شوند."
     return msg
 
@@ -1437,10 +1486,15 @@ def format_forex_price_message(forex_data):
         msg += f"**{name}**\n"
         msg += f"قیمت: {price:,.0f}\n"
         msg += f"تغییر: (%{change:+.2f}) {change:+,.0f}\n\n"
+    if len(msg.strip()) == len("💰 **قیمت‌های لحظه‌ای ارز**\n\n"):
+        return "❌ داده‌های قیمت ارز موجود نیست."
     msg += "🔄 قیمت‌ها هر ۱۰ دقیقه به‌روزرسانی می‌شوند."
     return msg
 
-# ---------- دستورات و هندلرها ----------
+# ================================================================
+# ---------- دستورات و هندلرها (بدون تغییر اصلی) ----------
+# ================================================================
+
 @bot.message_handler(commands=['start'])
 @rate_limited_handler
 def start(message):
@@ -1738,7 +1792,16 @@ def handle_gold_price(message):
         msg = format_gold_price_message(gold_data)
         bot.send_message(user_id, msg, parse_mode='Markdown')
     else:
-        bot.send_message(user_id, "❌ در دریافت قیمت طلا خطا رخ داد. لطفاً بعداً تلاش کنید.")
+        # تلاش با منبع جایگزین: قیمت انس طلا از PriceFetcher
+        gold_price_info = get_gold_price()
+        if gold_price_info:
+            msg = f"🥇 **قیمت انس طلا (XAU/USD)**\n"
+            msg += f"💰 قیمت: {gold_price_info['price']:,.2f} $\n"
+            msg += f"📊 تغییر ۲۴h: {gold_price_info['change']:.2f}%\n"
+            msg += f"📌 منبع: {gold_price_info.get('source', 'نامشخص')}"
+            bot.send_message(user_id, msg, parse_mode='Markdown')
+        else:
+            bot.send_message(user_id, "❌ در دریافت قیمت طلا خطا رخ داد. لطفاً بعداً تلاش کنید.")
     try:
         bot.delete_message(user_id, processing_msg.message_id)
     except:
@@ -1757,7 +1820,15 @@ def handle_forex_price(message):
         msg = format_forex_price_message(forex_data)
         bot.send_message(user_id, msg, parse_mode='Markdown')
     else:
-        bot.send_message(user_id, "❌ در دریافت قیمت ارز خطا رخ داد. لطفاً بعداً تلاش کنید.")
+        # Fallback: استفاده از get_usd_irt برای قیمت دلار
+        usd_price = get_usd_irt()
+        if usd_price:
+            msg = f"💰 **قیمت دلار**\n"
+            msg += f"قیمت: {usd_price:,.0f} ریال\n"
+            msg += "🔄 قیمت‌ها هر ۱۰ دقیقه به‌روزرسانی می‌شوند."
+            bot.send_message(user_id, msg, parse_mode='Markdown')
+        else:
+            bot.send_message(user_id, "❌ در دریافت قیمت ارز خطا رخ داد. لطفاً بعداً تلاش کنید.")
     try:
         bot.delete_message(user_id, processing_msg.message_id)
     except:
@@ -1772,7 +1843,6 @@ def handle_gold_analysis(message):
         return
     processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل طلا (XAU/USD) در تایم‌فریم روزانه... لطفاً صبر کنید.")
     try:
-        # تحلیل طلا با نماد XAU/USD
         analysis_data, chart_img, error = generate_technical_analysis("XAU/USD", '1d', 'crypto')
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1823,7 +1893,16 @@ def handle_forex_analysis(message):
             msg += "این تحلیل بر اساس قیمت لحظه‌ای و تغییرات روزانه است و توصیه معاملاتی محسوب نمی‌شود."
             bot.send_message(user_id, msg, parse_mode='Markdown')
         else:
-            bot.send_message(user_id, "❌ دریافت قیمت دلار ممکن نیست.")
+            # Fallback: استفاده از get_usd_irt
+            usd_price = get_usd_irt()
+            if usd_price:
+                msg = f"📊 **تحلیل دلار (بر اساس قیمت لحظه‌ای)**\n\n"
+                msg += f"💰 قیمت فعلی: {usd_price:,.0f} ریال\n"
+                msg += "📈 تغییر ۲۴ ساعته: قابل محاسبه نیست (منبع جایگزین)\n"
+                msg += "💡 پیشنهاد: با توجه به قیمت فعلی، روند کلی را از منابع دیگر بررسی کنید."
+                bot.send_message(user_id, msg, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, "❌ دریافت قیمت دلار ممکن نیست.")
     except Exception as e:
         logger.error(f"Forex analysis error: {e}")
         bot.send_message(user_id, "❌ خطا در تحلیل دلار. لطفاً مجدداً تلاش کنید.")
