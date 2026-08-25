@@ -1282,7 +1282,10 @@ ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
 waiting_for_symbol = {}
 waiting_for_signal = {}
 
+# ================================================================
 # ========== دکمه‌های جدید برای طلا و دلار ==========
+# ================================================================
+
 def gold_forex_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_gold_analysis = KeyboardButton("📊 تحلیل طلا")
@@ -1293,7 +1296,7 @@ def gold_forex_menu_keyboard():
     keyboard.add(btn_gold_analysis, btn_forex_analysis, btn_gold_price, btn_forex_price, btn_back)
     return keyboard
 
-# ---------- دکمه‌های منو ----------
+# ---------- دکمه‌های منو (اصلاح شده با اضافه شدن دکمه جدید) ----------
 def main_menu_keyboard():
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn_price = KeyboardButton("📊 قیمت لحظه‌ای")
@@ -1336,12 +1339,113 @@ def rate_limited_handler(func):
     return wrapper
 
 # ================================================================
-# ========== توابع دریافت قیمت اصلاح‌شده ==========
+# ========== توابع دریافت قیمت به ریال (جدید) ==========
 # ================================================================
 
-# --- دریافت قیمت از بیت‌پین با پشتیبانی از دو فرمت آدرس و retry ---
+def get_gold_prices_computed():
+    """
+    محاسبه قیمت‌های طلا به ریال بر اساس انس طلا (XAU/USD) و قیمت دلار (USD/IRR)
+    شامل: سکه امامي، سکه بهار، انس طلا، طلا 24 عیار، طلا 18 عیار
+    """
+    cache_key = "gold_prices_computed"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
+
+    # دریافت قیمت انس طلا (دلاری)
+    gold_usd = get_gold_price()
+    if not gold_usd:
+        return None
+    xau_usd = gold_usd['price']
+    xau_change = gold_usd.get('change', 0)
+
+    # دریافت قیمت دلار به ریال
+    usd_irt = get_usd_irt()
+    if not usd_irt:
+        return None
+
+    # محاسبه قیمت انس به ریال
+    ons_irr = xau_usd * usd_irt
+
+    # وزن هر انس = 31.1035 گرم
+    gram_24_irr = ons_irr / 31.1035  # قیمت هر گرم طلای 24 عیار به ریال
+    gram_18_irr = gram_24_irr * (18 / 24)  # طلای 18 عیار
+
+    # سکه امامي: وزن 8.133 گرم، عیار 22 (0.916)
+    emami_weight = 8.133
+    emami_purity = 0.916
+    emami_irr = gram_24_irr * emami_weight * emami_purity
+
+    # سکه بهار آزادی: وزن 8.133 گرم، عیار 0.900
+    bahar_weight = 8.133
+    bahar_purity = 0.900
+    bahar_irr = gram_24_irr * bahar_weight * bahar_purity
+
+    # درصد تغییرات برای هر کدام (تقریباً مشابه انس)
+    change_percent = xau_change
+
+    # تاریخ بروزرسانی
+    updated_at = datetime.now().strftime('%H:%M:%S')
+
+    result = {
+        'sale_emami': {'price': emami_irr, 'change': emami_irr * change_percent / 100, 'change_percent': change_percent, 'updated_at': updated_at},
+        'sale_bahar': {'price': bahar_irr, 'change': bahar_irr * change_percent / 100, 'change_percent': change_percent, 'updated_at': updated_at},
+        'ons_gold': {'price': ons_irr, 'change': ons_irr * change_percent / 100, 'change_percent': change_percent, 'updated_at': updated_at},
+        'gold_24': {'price': gram_24_irr, 'change': gram_24_irr * change_percent / 100, 'change_percent': change_percent, 'updated_at': updated_at},
+        'gold_18': {'price': gram_18_irr, 'change': gram_18_irr * change_percent / 100, 'change_percent': change_percent, 'updated_at': updated_at}
+    }
+
+    fetcher._set_cache(cache_key, result)
+    return result
+
+def get_forex_prices_computed():
+    """
+    محاسبه قیمت دلار، یورو و تتر به ریال با استفاده از USD/IRR و EUR/USD
+    """
+    cache_key = "forex_prices_computed"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
+
+    usd_irt = get_usd_irt()
+    if not usd_irt:
+        return None
+
+    # قیمت یورو به دلار
+    eur_usd_info = get_crypto_price("EUR/USDT")
+    if eur_usd_info:
+        eur_usd = eur_usd_info['price']
+    else:
+        eur_usd = None
+
+    # قیمت تتر به دلار = 1 (تقریباً)
+    usdt_usd = 1.0
+
+    # دلار
+    usd_price = usd_irt
+    # تتر
+    usdt_price = usd_irt * usdt_usd
+    # یورو
+    if eur_usd:
+        eur_price = usd_irt * eur_usd
+    else:
+        eur_price = None
+
+    result = {}
+    if usd_price:
+        result['دلار'] = {'price': usd_price, 'change': 0}
+    if usdt_price:
+        result['تتر'] = {'price': usdt_price, 'change': 0}
+    if eur_price:
+        result['یورو'] = {'price': eur_price, 'change': 0}
+
+    if result:
+        fetcher._set_cache(cache_key, result)
+        return result
+    return None
+
+# --- دریافت از بیت‌پین (همان کد قبلی، با اصلاح نمادها) ---
 def get_bitpin_price(symbol):
-    """دریافت قیمت لحظه‌ای از صرافی بیت‌پین با دو روش مختلف"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -1354,24 +1458,19 @@ def get_bitpin_price(symbol):
             resp = requests.get(url, headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                # ساختار پاسخ ممکن است متفاوت باشد: گاهی ticker در data است، گاهی مستقیم
                 ticker = data.get('ticker')
                 if not ticker:
-                    # ممکن است پاسخ مستقیم باشد
                     ticker = data
                 if ticker and ticker.get('last') is not None:
                     price = float(ticker['last'])
                     change = float(ticker.get('change', 0))
                     return {'price': price, 'change': change}
-            else:
-                logger.warning(f"Bitpin {url} returned {resp.status_code}")
         except Exception as e:
             logger.warning(f"Bitpin error for {symbol} with {url}: {e}")
             continue
     return None
 
 def get_bitpin_prices():
-    """دریافت قیمت دلار، یورو و تتر از بیت‌پین با کش"""
     cache_key = "bitpin_prices"
     cached = fetcher._get_cached(cache_key)
     if cached:
@@ -1387,57 +1486,31 @@ def get_bitpin_prices():
         data = get_bitpin_price(sym)
         if data:
             result[name] = data
-        else:
-            logger.warning(f"Could not fetch {name} from Bitpin")
     if result:
         fetcher._set_cache(cache_key, result)
     return result
 
-# --- دریافت قیمت طلا از tgju.org با بهبود retry و هدر ---
-def get_gold_prices_from_tgju():
-    """دریافت قیمت‌های طلا و سکه از tgju.org با هدر مناسب"""
-    cache_key = "tgju_gold_prices"
-    cached = fetcher._get_cached(cache_key)
-    if cached:
-        return cached
+# --- تابع ترکیبی برای قیمت ارز (اول بیت‌پین، سپس محاسبه) ---
+def get_forex_prices():
+    """ترکیب بیت‌پین و محاسبه برای دریافت قیمت ارز"""
+    bitpin = get_bitpin_prices()
+    if bitpin and len(bitpin) >= 3:
+        return bitpin
+    # اگر بیت‌پین کامل نبود، از محاسبه استفاده کن
+    computed = get_forex_prices_computed()
+    if computed:
+        # در صورت وجود بیت‌پین، اولویت با بیت‌پین است اما برای آیتم‌های گمشده از computed استفاده می‌کنیم
+        merged = {}
+        if bitpin:
+            merged.update(bitpin)
+        if computed:
+            for k, v in computed.items():
+                if k not in merged:
+                    merged[k] = v
+        return merged
+    return bitpin or computed
 
-    url = "https://api.tgju.org/v1/market/price/"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
-    }
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, timeout=6)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get('status') == 'success' and 'data' in data:
-                    items = data['data']
-                    gold_items = {}
-                    for item in items:
-                        key = item.get('key')
-                        if key in ['sale_emami', 'sale_bahar', 'ons_gold', 'gold_24', 'gold_18']:
-                            gold_items[key] = {
-                                'price': item.get('price'),
-                                'change': item.get('change'),
-                                'change_percent': item.get('change_percent'),
-                                'updated_at': item.get('updated_at')
-                            }
-                    if gold_items:
-                        fetcher._set_cache(cache_key, gold_items)
-                        return gold_items
-                    else:
-                        logger.warning("No valid gold items in response")
-                else:
-                    logger.warning(f"tgju response status not success: {data.get('status')}")
-            else:
-                logger.warning(f"tgju returned status {resp.status_code}")
-        except Exception as e:
-            logger.warning(f"tgju attempt {attempt+1} failed: {e}")
-        time.sleep(1)
-    return None
-
-# --- توابع فرمت‌دهی پیام (بدون تغییر) ---
+# ---------- توابع فرمت‌دهی پیام ----------
 def format_gold_price_message(gold_data):
     if not gold_data:
         return "❌ دریافت قیمت طلا ممکن نیست. لطفاً بعداً تلاش کنید."
@@ -1455,9 +1528,9 @@ def format_gold_price_message(gold_data):
         if key in gold_data:
             item = gold_data[key]
             price = item['price']
-            change = item['change']
-            change_percent = item['change_percent']
-            updated = item['updated_at']
+            change = item.get('change', 0)
+            change_percent = item.get('change_percent', 0)
+            updated = item.get('updated_at', datetime.now().strftime('%H:%M:%S'))
             if price is not None:
                 if key == 'ons_gold':
                     price_str = f"{price:,.2f}"
@@ -1467,7 +1540,7 @@ def format_gold_price_message(gold_data):
                     change_str = f"{int(change):+,}" if change else "0"
                 msg += f"**{name}**\n"
                 msg += f"قیمت: {price_str}\n"
-                if change is not None:
+                if change_percent:
                     msg += f"تغییر: (%{change_percent:+.2f}) {change_str}\n"
                 msg += f"آخرین به‌روزرسانی: {updated}\n\n"
     if len(msg.strip()) == len("💰 **قیمت‌های لحظه‌ای طلا و سکه**\n\n"):
@@ -1482,7 +1555,7 @@ def format_forex_price_message(forex_data):
     msg = "💰 **قیمت‌های لحظه‌ای ارز**\n\n"
     for name, data in forex_data.items():
         price = data['price']
-        change = data['change']
+        change = data.get('change', 0)
         msg += f"**{name}**\n"
         msg += f"قیمت: {price:,.0f}\n"
         msg += f"تغییر: (%{change:+.2f}) {change:+,.0f}\n\n"
@@ -1492,7 +1565,7 @@ def format_forex_price_message(forex_data):
     return msg
 
 # ================================================================
-# ---------- دستورات و هندلرها (بدون تغییر اصلی) ----------
+# ---------- دستورات و هندلرها ----------
 # ================================================================
 
 @bot.message_handler(commands=['start'])
@@ -1769,7 +1842,10 @@ def handle_help(message):
     )
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
+# ================================================================
 # ========== هندلرهای جدید برای طلا و دلار ==========
+# ================================================================
+
 @bot.message_handler(func=lambda msg: msg.text == "💰 تحلیل و قیمت طلا و دلار")
 @rate_limited_handler
 def handle_gold_forex_menu(message):
@@ -1787,18 +1863,21 @@ def handle_gold_price(message):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     processing_msg = bot.send_message(user_id, "⏳ دریافت قیمت طلا... لطفاً صبر کنید.")
-    gold_data = get_gold_prices_from_tgju()
+
+    gold_data = get_gold_prices_computed()
     if gold_data:
         msg = format_gold_price_message(gold_data)
         bot.send_message(user_id, msg, parse_mode='Markdown')
     else:
-        # تلاش با منبع جایگزین: قیمت انس طلا از PriceFetcher
-        gold_price_info = get_gold_price()
-        if gold_price_info:
+        # در صورت شکست، از انس طلا به عنوان پشتیبان استفاده کن
+        gold_info = get_gold_price()
+        usd_irt = get_usd_irt()
+        if gold_info and usd_irt:
+            ons_irr = gold_info['price'] * usd_irt
             msg = f"🥇 **قیمت انس طلا (XAU/USD)**\n"
-            msg += f"💰 قیمت: {gold_price_info['price']:,.2f} $\n"
-            msg += f"📊 تغییر ۲۴h: {gold_price_info['change']:.2f}%\n"
-            msg += f"📌 منبع: {gold_price_info.get('source', 'نامشخص')}"
+            msg += f"💰 قیمت: {ons_irr:,.2f} ریال\n"
+            msg += f"📊 تغییر ۲۴h: {gold_info['change']:.2f}%\n"
+            msg += f"📌 منبع: {gold_info.get('source', 'نامشخص')}"
             bot.send_message(user_id, msg, parse_mode='Markdown')
         else:
             bot.send_message(user_id, "❌ در دریافت قیمت طلا خطا رخ داد. لطفاً بعداً تلاش کنید.")
@@ -1815,12 +1894,13 @@ def handle_forex_price(message):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
     processing_msg = bot.send_message(user_id, "⏳ دریافت قیمت ارز... لطفاً صبر کنید.")
-    forex_data = get_bitpin_prices()
+
+    forex_data = get_forex_prices()
     if forex_data:
         msg = format_forex_price_message(forex_data)
         bot.send_message(user_id, msg, parse_mode='Markdown')
     else:
-        # Fallback: استفاده از get_usd_irt برای قیمت دلار
+        # پشتیبان: فقط دلار از get_usd_irt
         usd_price = get_usd_irt()
         if usd_price:
             msg = f"💰 **قیمت دلار**\n"
@@ -1871,11 +1951,11 @@ def handle_forex_analysis(message):
         return
     processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل دلار (USD/IRT)... لطفاً صبر کنید.")
     try:
-        forex_data = get_bitpin_prices()
+        forex_data = get_forex_prices()
         if forex_data and 'دلار' in forex_data:
             usd = forex_data['دلار']
             price = usd['price']
-            change = usd['change']
+            change = usd.get('change', 0)
             if change > 0:
                 trend = "صعودی"
                 suggestion = "احتمال ادامه رشد وجود دارد."
@@ -1893,7 +1973,6 @@ def handle_forex_analysis(message):
             msg += "این تحلیل بر اساس قیمت لحظه‌ای و تغییرات روزانه است و توصیه معاملاتی محسوب نمی‌شود."
             bot.send_message(user_id, msg, parse_mode='Markdown')
         else:
-            # Fallback: استفاده از get_usd_irt
             usd_price = get_usd_irt()
             if usd_price:
                 msg = f"📊 **تحلیل دلار (بر اساس قیمت لحظه‌ای)**\n\n"
