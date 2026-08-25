@@ -37,15 +37,12 @@ BASE_URL = os.environ.get("BASE_URL", "https://trade-i4js.onrender.com")
 ADMIN_IDS_ENV = os.environ.get("ADMIN_IDS", "6542890217")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()]
 
-# تنظیمات Rate Limiting (تعداد درخواست در دقیقه برای هر کاربر)
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", 20))
-RATE_LIMIT_PERIOD = 60  # ثانیه
+RATE_LIMIT_PERIOD = 60
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
-
-# غیرفعال کردن debug در محیط تولید
 app.debug = False
 
 logging.basicConfig(
@@ -60,7 +57,6 @@ import threading
 rate_limit_lock = threading.Lock()
 
 def is_rate_limited(user_id):
-    """بررسی محدودیت نرخ درخواست برای کاربر"""
     now = time.time()
     with rate_limit_lock:
         if user_id not in rate_limit_store:
@@ -80,7 +76,7 @@ def check_webhook_secret():
             logger.warning("Unauthorized webhook request (invalid secret)")
             return jsonify({"status": "unauthorized"}), 401
 
-# ---------- دیتابیس با مدیریت context ----------
+# ---------- دیتابیس ----------
 def get_db_connection():
     conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -107,7 +103,7 @@ def init_db():
 
 init_db()
 
-# ---------- توابع کمکی با امنیت بیشتر ----------
+# ---------- توابع کمکی ----------
 def get_user_expiry(user_id):
     with get_db_connection() as conn:
         c = conn.cursor()
@@ -142,7 +138,6 @@ def get_owner_name(user_id):
         return "کاربر"
 
 def safe_symbol(symbol):
-    """اعتبارسنجی و پاکسازی نماد"""
     if not symbol:
         return None
     symbol = symbol.strip().upper()
@@ -150,7 +145,7 @@ def safe_symbol(symbol):
         return None
     return symbol
 
-# ========== سیستم دریافت قیمت (فقط بیت‌پین و نوبیتکس) ==========
+# ========== سیستم دریافت قیمت ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
@@ -170,17 +165,14 @@ fetcher = PriceFetcher()
 
 # ---------- بیت‌پین ----------
 def get_bitpin_price(symbol):
-    """دریافت قیمت از بیت‌پین برای نمادهای: USDIRT, EURIRT, USDTIRT, XAU-USDT"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json'
     }
-    # بیت‌پین برای طلا از XAU-USDT استفاده می‌کند
     if symbol == 'XAU-USDT':
         url = "https://api.bitpin.ir/api/v1/market/ticker/?symbol=XAU-USDT"
     else:
         url = f"https://api.bitpin.ir/api/v1/market/ticker/?symbol={symbol}"
-    
     try:
         resp = requests.get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
@@ -197,7 +189,6 @@ def get_bitpin_price(symbol):
 
 # ---------- نوبیتکس ----------
 def get_nobitex_price(symbol):
-    """دریافت قیمت از نوبیتکس برای نمادهای: USDTIRT"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json'
@@ -214,14 +205,12 @@ def get_nobitex_price(symbol):
         logger.warning(f"Nobitex error for {symbol}: {e}")
     return None
 
-# ---------- دریافت قیمت طلا (فقط از بیت‌پین) ----------
+# ---------- قیمت طلا ----------
 def get_gold_price_from_bitpin():
-    """دریافت قیمت انس طلا از بیت‌پین (XAU-USDT) با کش"""
     cache_key = "gold_price_bitpin"
     cached = fetcher._get_cached(cache_key)
     if cached:
         return cached
-
     data = get_bitpin_price('XAU-USDT')
     if data:
         result = {
@@ -234,17 +223,13 @@ def get_gold_price_from_bitpin():
         return result
     return None
 
-# ---------- دریافت قیمت ارزها (فقط از بیت‌پین و نوبیتکس) ----------
+# ---------- قیمت ارزها ----------
 def get_forex_prices():
-    """دریافت قیمت دلار، یورو و تتر از بیت‌پین (اولویت) و نوبیتکس (پشتیبان)"""
     cache_key = "forex_prices_bitpin"
     cached = fetcher._get_cached(cache_key)
     if cached:
         return cached
-
     result = {}
-    
-    # 1. بیت‌پین
     bitpin_symbols = {
         'USDIRT': 'دلار',
         'EURIRT': 'یورو',
@@ -254,28 +239,42 @@ def get_forex_prices():
         data = get_bitpin_price(sym)
         if data:
             result[name] = data
-    
-    # 2. اگر تتر از بیت‌پین نیامد، از نوبیتکس بگیر
     if 'تتر' not in result:
         nobitex_data = get_nobitex_price('USDTIRT')
         if nobitex_data:
             result['تتر'] = nobitex_data
-    
-    # 3. اگر هیچ داده‌ای نبود، خالی برگردان
     if result:
         fetcher._set_cache(cache_key, result)
     return result
 
-# ---------- توابع فرمت‌دهی پیام ----------
+# ---------- قیمت کریپتو (برای دکمه‌های قیمت لحظه‌ای) ----------
+def get_crypto_price(symbol):
+    """
+    دریافت قیمت لحظه‌ای از بایننس برای جفت‌ارزهای USDT (مثل BTC/USDT)
+    """
+    try:
+        exchange = ccxt.binance({'enableRateLimit': True, 'timeout': 8000})
+        ticker = exchange.fetch_ticker(symbol)
+        if ticker and ticker.get('last'):
+            return {
+                'price': ticker['last'],
+                'change': ticker.get('percentage', 0),
+                'high': ticker.get('high'),
+                'low': ticker.get('low'),
+                'source': 'Binance'
+            }
+    except Exception as e:
+        logger.warning(f"Binance price error for {symbol}: {e}")
+    return None
+
+# ---------- توابع فرمت‌دهی ----------
 def format_gold_price_message(gold_data):
     if not gold_data:
         return "❌ دریافت قیمت طلا از بیت‌پین ممکن نیست. لطفاً بعداً تلاش کنید."
-
     price = gold_data['price']
     change = gold_data.get('change', 0)
     change_percent = gold_data.get('change_percent', 0)
     updated = gold_data.get('updated_at', datetime.now().strftime('%H:%M:%S'))
-
     msg = "💰 **قیمت لحظه‌ای انس طلا (XAU/USDT)**\n\n"
     msg += f"قیمت: {price:,.2f} دلار\n"
     msg += f"تغییر: (%{change_percent:+.2f}) {change:+.2f}\n"
@@ -287,7 +286,6 @@ def format_gold_price_message(gold_data):
 def format_forex_price_message(forex_data):
     if not forex_data:
         return "❌ دریافت قیمت ارز از بیت‌پین/نوبیتکس ممکن نیست. لطفاً بعداً تلاش کنید."
-
     msg = "💰 **قیمت‌های لحظه‌ای ارز**\n\n"
     for name, data in forex_data.items():
         price = data['price']
@@ -301,7 +299,7 @@ def format_forex_price_message(forex_data):
     msg += "📌 منابع: بیت‌پین و نوبیتکس"
     return msg
 
-# ========== توابع تحلیل تکنیکال (بدون تغییر) ==========
+# ========== توابع تحلیل تکنیکال ==========
 def calculate_indicators(data):
     df = pd.DataFrame({
         'high': data['high'],
@@ -309,7 +307,6 @@ def calculate_indicators(data):
         'close': data['close'],
         'volume': data['volume']
     })
-    
     df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
     df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
     df['RSI'] = RSIIndicator(close=df['close'], window=14).rsi()
@@ -330,7 +327,6 @@ def calculate_indicators(data):
     df['DI_minus'] = adx.adx_neg()
     df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
     df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
-    
     return df
 
 def find_support_resistance(data, lookback=50):
@@ -389,7 +385,6 @@ def generate_trading_signal(data, indicators):
         signal = 'neutral'
         trend = 'خنثی'
         score = round(5 + (max(buy_conditions, sell_conditions) / total_conditions) * 2, 1)
-
     return signal, trend, score
 
 def determine_context(data):
@@ -426,56 +421,64 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
     try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
-        
         dates = data['dates']
         closes = data['close']
         highs = data['high']
         lows = data['low']
         opens = data['open']
-        
+
         for i in range(len(dates)):
             color = '#2ecc71' if closes[i] >= opens[i] else '#e74c3c'
-            ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]), 
+            ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]),
                    color=color, width=0.6, alpha=0.8)
-            ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]], 
+            ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]],
                     color=color, linewidth=1)
-            ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
+            ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])],
                     color=color, linewidth=1)
-        
+
         ax1.plot(dates, indicators['EMA_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
         ax1.plot(dates, indicators['EMA_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
         ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Upper')
         ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Middle')
         ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Lower')
-        
+
         ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
         ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
-        
+
         last_price = closes[-1]
         ax1.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax1.transAxes,
                 fontsize=12, color='white', verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
-        
+
         ax1.set_facecolor('#1a1a2e')
         ax1.grid(True, alpha=0.3, linestyle='dotted')
         ax1.legend(loc='upper left')
         tf_name = TIMEFRAME_NAMES.get(timeframe, timeframe)
-        asset_label = "Forex" if asset_type == 'forex' else "Crypto"
+        # تنظیم برچسب بر اساس نوع دارایی
+        if asset_type == 'irt':
+            ylabel = 'Price (IRR)'
+            asset_label = 'IRT'
+        elif asset_type == 'forex':
+            ylabel = 'Price (USD)'
+            asset_label = 'Forex'
+        else:
+            ylabel = 'Price (USDT)'
+            asset_label = 'Crypto'
         ax1.set_title(f'{symbol} - {tf_name} Chart ({asset_label})', color='white', fontsize=14)
-        ax1.set_ylabel('Price (USD)' if asset_type == 'forex' else 'Price (USDT)', color='white')
+        ax1.set_ylabel(ylabel, color='white')
         ax1.tick_params(colors='white')
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
-        
+
         ax2.bar(dates, data['volume'], color='#3498db', alpha=0.7)
         ax2.set_facecolor('#1a1a2e')
         ax2.grid(True, alpha=0.3, linestyle='dotted')
         ax2.set_ylabel('Volume', color='white')
         ax2.tick_params(colors='white')
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
-        
+
         plt.xticks(rotation=0)
         plt.tight_layout()
-        
+
         img_data = BytesIO()
         plt.savefig(img_data, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
@@ -492,20 +495,17 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     if not symbol.endswith('/USDT'):
         logger.warning(f"Skipping non-USDT symbol: {symbol}")
         return None
-    
     cache_key = f"{symbol}_{timeframe}_{limit}"
     if cache_key in historical_cache:
         data, timestamp = historical_cache[cache_key]
         if (datetime.now() - timestamp).seconds < 600:
             return data
-    
     exchanges = [
         ccxt.binance({'enableRateLimit': True, 'timeout': 8000}),
         ccxt.kraken({'enableRateLimit': True, 'timeout': 8000}),
         ccxt.kucoin({'enableRateLimit': True, 'timeout': 8000}),
         ccxt.okx({'enableRateLimit': True, 'timeout': 8000})
     ]
-    
     for exchange in exchanges:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -530,7 +530,6 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
             logger.warning(f"Failed to fetch from {exchange.name}: {e}")
             time.sleep(0.3)
             continue
-    
     return None
 
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
@@ -540,32 +539,26 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         '1d': '1d'
     }
     yf_tf = tf_map.get(timeframe, '1d')
-    
     if timeframe == '4h':
         limit = limit * 4
-    
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
     if cache_key in forex_cache:
         data, timestamp = forex_cache[cache_key]
         if (datetime.now() - timestamp).seconds < 600:
             return data
-    
     try:
         ticker = yf.Ticker(f"{symbol}=X")
         df = ticker.history(period=f"{limit*2 if yf_tf=='1m' else limit}d", interval=yf_tf)
         if df.empty:
             logger.warning(f"No data for {symbol}")
             return None
-        
         df = df.tail(limit)
-        
         dates = df.index.to_pydatetime()
         opens = df['Open'].values
         highs = df['High'].values
         lows = df['Low'].values
         closes = df['Close'].values
         volumes = df['Volume'].values
-        
         data = {
             'dates': dates,
             'open': np.array(opens),
@@ -583,58 +576,104 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
 
 forex_cache = {}
 
+# ---------- دریافت OHLCV از بیت‌پین (برای IRT) ----------
+def get_bitpin_ohlcv(symbol, timeframe='1d', limit=200):
+    """
+    دریافت داده‌های OHLCV از بیت‌پین برای نمادهای ریالی (USDIRT, EURIRT, USDTIRT)
+    """
+    resolution_map = {
+        '1m': '1m', '5m': '5m', '15m': '15m',
+        '30m': '30m', '1h': '1h', '4h': '4h',
+        '1d': '1D'
+    }
+    resolution = resolution_map.get(timeframe, '1D')
+    url = f"https://api.bitpin.ir/api/v1/market/ohlcv/?symbol={symbol}&resolution={resolution}&limit={limit}"
+    try:
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            candles = data.get('data', {}).get('candles', [])
+            if not candles:
+                return None
+            dates = [datetime.fromtimestamp(c[0] / 1000) for c in candles]  # timestamp in ms
+            opens = [float(c[1]) for c in candles]
+            highs = [float(c[2]) for c in candles]
+            lows = [float(c[3]) for c in candles]
+            closes = [float(c[4]) for c in candles]
+            volumes = [float(c[5]) for c in candles]
+            return {
+                'dates': dates,
+                'open': np.array(opens),
+                'high': np.array(highs),
+                'low': np.array(lows),
+                'close': np.array(closes),
+                'volume': np.array(volumes)
+            }
+    except Exception as e:
+        logger.error(f"Bitpin OHLCV error for {symbol}: {e}")
+    return None
+
+# ========== تابع اصلی تحلیل تکنیکال ==========
 def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
     try:
-        if asset_type == 'crypto':
+        # تشخیص نمادهای ریالی (ختم به IRT)
+        is_irt = symbol.endswith('IRT') and symbol in ['USDIRT', 'EURIRT', 'USDTIRT']
+
+        if is_irt:
+            # دریافت داده از بیت‌پین
+            data = get_bitpin_ohlcv(symbol, timeframe, limit=200)
+            if data is None or data.get('close') is None or len(data['close']) < 30:
+                return None, None, f"❌ داده‌های تاریخی کافی برای {symbol} در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
+            actual_asset_type = 'irt'
+        elif asset_type == 'crypto':
             if not symbol.endswith('/USDT'):
                 symbol_usdt = f"{symbol}/USDT"
             else:
                 symbol_usdt = symbol
-            
             if timeframe in ['1m', '5m']:
                 limit = 80
             elif timeframe in ['15m', '30m']:
                 limit = 120
             else:
                 limit = 180
-                
             data = get_historical_data_multi(symbol_usdt, timeframe, limit)
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
-        else:
+            actual_asset_type = 'crypto'
+        else:  # forex
             if timeframe in ['1m', '5m']:
                 limit = 80
             elif timeframe in ['15m', '30m']:
                 limit = 120
             else:
                 limit = 180
-                
             data = get_forex_historical_data(symbol, timeframe, limit)
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای جفت‌ارز {symbol} در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
-        
+            actual_asset_type = 'forex'
+
         indicators = calculate_indicators(data)
         support, resistance = find_support_resistance(data)
         signal_type, trend, score = generate_trading_signal(data, indicators)
         context = determine_context(data)
         rrr = calculate_rrr(data, signal_type)
         atr = indicators['ATR'].iloc[-1] if not np.isnan(indicators['ATR'].iloc[-1]) else 0
-        
+
         if atr > 0:
             risk_level = "متوسط" if atr / data['close'][-1] < 0.02 else "بالا"
         else:
             risk_level = "متوسط"
-        
+
         if score >= 8 and rrr > 2:
             status = "✅ مناسب برای ورود"
         elif score >= 6 and rrr > 1.5:
             status = "⏳ منتظر تایید"
         else:
             status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
-        
+
         signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
         signal_persian = signal_map.get(signal_type, 'نامشخص')
-        
+
         analysis_data = {
             'symbol': symbol,
             'context': context,
@@ -655,47 +694,60 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             'macd': indicators['MACD'].iloc[-1] if not np.isnan(indicators['MACD'].iloc[-1]) else 0,
             'bb_position': 'بالای میانگین' if data['close'][-1] > indicators['BB_middle'].iloc[-1] else 'زیر میانگین'
         }
-        
+
         chart_img = None
         try:
-            chart_img = plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type)
+            chart_img = plot_chart(data, indicators, symbol, support, resistance, timeframe, actual_asset_type)
         except Exception as chart_error:
             logger.warning(f"Chart plotting failed: {chart_error}")
-        
+
         return analysis_data, chart_img, None
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
         return None, None, f"❌ خطا در تحلیل تکنیکال: لطفاً مجدداً تلاش کنید."
 
+# ========== فرمت پیام تحلیل ==========
 def format_analysis_message(data):
     if not data:
         return "❌ اطلاعات کافی برای تحلیل وجود ندارد."
-    msg = f"📊 **تحلیل تکنیکال {data['symbol']}**\n\n"
+    # تشخیص واحد پول
+    if data['symbol'].endswith('IRT'):
+        currency = "ریال"
+        symbol_clean = data['symbol'].replace('IRT', '')
+        price_format = "{:,.0f}"
+    else:
+        currency = "$"
+        symbol_clean = data['symbol']
+        price_format = "{:,.2f}"
+
+    msg = f"📊 **تحلیل تکنیکال {symbol_clean}**\n\n"
     msg += f"### 1. خلاصه کلی\n"
     msg += f"- **زمینه روزانه:** {data['context']}\n"
     msg += f"- **روند اصلی:** {data['trend']}\n"
-    msg += f"- **حمایت کلیدی:** {data['support']:,.2f}\n"
-    msg += f"- **مقاومت کلیدی:** {data['resistance']:,.2f}\n"
+    msg += f"- **حمایت کلیدی:** {price_format.format(data['support'])} {currency}\n"
+    msg += f"- **مقاومت کلیدی:** {price_format.format(data['resistance'])} {currency}\n"
     msg += f"- **نوع سیگنال:** {data['signal']}\n"
     msg += f"- **امتیاز کیفیت ستاپ:** {data['score']}\n"
     msg += f"- **کیفیت رویداد (R:R):** {data['rrr']}\n"
     msg += f"- **سطح ریسک (حد ضرر):** {data['risk']}\n"
     msg += f"- **وضعیت اجرا:** {data['status']}\n\n"
+
     if data['signal'] == 'لانگ':
         msg += f"**تحلیل:**\n"
-        msg += f"قیمت {data['symbol']} با شکست مقاومت {data['resistance']:,.2f} وارد فاز صعودی شده است. "
+        msg += f"قیمت {symbol_clean} با شکست مقاومت {price_format.format(data['resistance'])} {currency} وارد فاز صعودی شده است. "
         msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
-        msg += f"پتانسیل رشد تا سطح {data['resistance'] + (data['resistance'] - data['support']):,.2f} وجود دارد. "
-        msg += f"حد ضرر در صورت نزول قیمت به زیر {data['support']:,.2f} توصیه می‌شود.\n\n"
+        msg += f"پتانسیل رشد تا سطح {price_format.format(data['resistance'] + (data['resistance'] - data['support']))} {currency} وجود دارد. "
+        msg += f"حد ضرر در صورت نزول قیمت به زیر {price_format.format(data['support'])} {currency} توصیه می‌شود.\n\n"
     elif data['signal'] == 'شورت':
         msg += f"**تحلیل:**\n"
-        msg += f"قیمت {data['symbol']} با شکست حمایت {data['support']:,.2f} وارد فاز نزولی شده است. "
+        msg += f"قیمت {symbol_clean} با شکست حمایت {price_format.format(data['support'])} {currency} وارد فاز نزولی شده است. "
         msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
-        msg += f"پتانسیل کاهش تا سطح {data['support'] - (data['resistance'] - data['support']):,.2f} وجود دارد. "
-        msg += f"حد ضرر در صورت صعود قیمت به بالای {data['resistance']:,.2f} توصیه می‌شود.\n\n"
+        msg += f"پتانسیل کاهش تا سطح {price_format.format(data['support'] - (data['resistance'] - data['support']))} {currency} وجود دارد. "
+        msg += f"حد ضرر در صورت صعود قیمت به بالای {price_format.format(data['resistance'])} {currency} توصیه می‌شود.\n\n"
     else:
         msg += f"**تحلیل:**\n"
-        msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
+        msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {price_format.format(data['support'])} یا {price_format.format(data['resistance'])} {currency} باشید.\n\n"
+
     msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
     return msg
 
@@ -703,12 +755,19 @@ def format_analysis_message(data):
 def generate_crypto_signal(symbol, analysis_data):
     if not analysis_data:
         return "❌ داده‌های کافی برای تولید سیگنال وجود ندارد."
+    # تشخیص واحد
+    if symbol.endswith('IRT'):
+        currency = "ریال"
+        price_format = "{:,.0f}"
+    else:
+        currency = "$"
+        price_format = "{:,.2f}"
 
     signal = f"📈 **سیگنال معاملاتی {symbol}**\n\n"
     signal += f"⏰ **تایم‌فریم:** {analysis_data['timeframe']}\n"
     signal += f"🔹 **نوع معامله:** {analysis_data['signal']}\n"
-    signal += f"💰 **قیمت ورود (ورود):** {analysis_data['last_price']:,.2f} $\n"
-    
+    signal += f"💰 **قیمت ورود (ورود):** {price_format.format(analysis_data['last_price'])} {currency}\n"
+
     if analysis_data['signal'] == 'لانگ':
         atr = analysis_data.get('atr', 0)
         if atr > 0:
@@ -717,8 +776,8 @@ def generate_crypto_signal(symbol, analysis_data):
         else:
             tp = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.5
             sl = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.3
-        signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
-        signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
+        signal += f"🎯 **حد سود (TP):** {price_format.format(tp)} {currency}\n"
+        signal += f"🛑 **حد ضرر (SL):** {price_format.format(sl)} {currency}\n"
     elif analysis_data['signal'] == 'شورت':
         atr = analysis_data.get('atr', 0)
         if atr > 0:
@@ -727,8 +786,8 @@ def generate_crypto_signal(symbol, analysis_data):
         else:
             tp = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.5
             sl = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.3
-        signal += f"🎯 **حد سود (TP):** {tp:,.2f} $\n"
-        signal += f"🛑 **حد ضرر (SL):** {sl:,.2f} $\n"
+        signal += f"🎯 **حد سود (TP):** {price_format.format(tp)} {currency}\n"
+        signal += f"🛑 **حد ضرر (SL):** {price_format.format(sl)} {currency}\n"
     else:
         signal += "⏳ **سیگنال:** بدون سیگنال واضح – منتظر بمانید.\n"
         signal += f"📊 **RSI:** {analysis_data.get('rsi', 0):.1f}\n"
@@ -743,7 +802,7 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار ==========
+# ========== توابع اخبار (بدون تغییر) ==========
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -1198,7 +1257,7 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
-# ---------- دکوراتور برای اعمال Rate Limit روی هندلرها ----------
+# ---------- دکوراتور Rate Limit ----------
 def rate_limited_handler(func):
     def wrapper(message):
         user_id = message.from_user.id
@@ -1320,7 +1379,7 @@ def handle_news(message):
     )
     bot.send_message(user_id, help_text, parse_mode='Markdown')
 
-# ===== بخش تحلیل ارز دلخواه (تایم‌فریم ۴ ساعته) =====
+# ===== تحلیل ارز دلخواه (تایم‌فریم ۴ ساعته) =====
 @bot.message_handler(func=lambda msg: msg.text == "🔍 تحلیل ارز دلخواه")
 @rate_limited_handler
 def handle_analyze(message):
@@ -1328,10 +1387,8 @@ def handle_analyze(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
-    
     help_text = (
         "🔍 **تحلیل تکنیکال پیشرفته (تایم‌فریم ۴ ساعته)**\n\n"
         "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
@@ -1354,11 +1411,9 @@ def handle_analyze(message):
 def analyze_step(message):
     user_id = message.chat.id
     symbol = safe_symbol(message.text.strip())
-    
     if not symbol:
         bot.send_message(user_id, "❌ لطفاً یک نماد معتبر (فقط حروف و اعداد) وارد کنید.")
         return
-    
     if symbol not in ALL_VALID_SYMBOLS:
         bot.send_message(
             user_id,
@@ -1368,19 +1423,15 @@ def analyze_step(message):
             parse_mode='Markdown'
         )
         return
-    
     is_crypto = symbol in VALID_CRYPTO_SYMBOLS
     asset_type = 'crypto' if is_crypto else 'forex'
-    
     processing_msg = bot.send_message(
         user_id,
         f"⏳ در حال تحلیل تکنیکال **{symbol}** در تایم‌فریم ۴ ساعته... لطفاً صبر کنید.\nاین فرآیند ممکن است تا ۱۵ ثانیه طول بکشد.",
         parse_mode='Markdown'
     )
-    
     try:
         analysis_data, chart_img, error = generate_technical_analysis(symbol, '4h', asset_type)
-        
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
             try:
@@ -1388,7 +1439,6 @@ def analyze_step(message):
             except:
                 pass
             return
-        
         if not analysis_data:
             bot.send_message(user_id, "❌ تحلیل تکنیکال برای این ارز در تایم‌فریم ۴ ساعته در دسترس نیست.", parse_mode='Markdown')
             try:
@@ -1396,35 +1446,22 @@ def analyze_step(message):
             except:
                 pass
             return
-        
         analysis_msg = format_analysis_message(analysis_data)
-        
         if chart_img:
             try:
-                bot.send_photo(
-                    user_id,
-                    chart_img,
-                    caption=analysis_msg,
-                    parse_mode='Markdown'
-                )
+                bot.send_photo(user_id, chart_img, caption=analysis_msg, parse_mode='Markdown')
             except Exception as photo_error:
                 logger.warning(f"Failed to send photo: {photo_error}")
                 bot.send_message(user_id, analysis_msg, parse_mode='Markdown')
         else:
             bot.send_message(user_id, analysis_msg, parse_mode='Markdown')
-        
         try:
             bot.delete_message(user_id, processing_msg.message_id)
         except:
             pass
-            
     except Exception as e:
         logger.error(f"Error in analyze_step: {e}")
-        bot.send_message(
-            user_id,
-            f"❌ خطا در تحلیل `{symbol}` در تایم‌فریم ۴ ساعته. لطفاً مجدداً تلاش کنید.",
-            parse_mode='Markdown'
-        )
+        bot.send_message(user_id, f"❌ خطا در تحلیل `{symbol}` در تایم‌فریم ۴ ساعته. لطفاً مجدداً تلاش کنید.", parse_mode='Markdown')
         try:
             bot.delete_message(user_id, processing_msg.message_id)
         except:
@@ -1438,12 +1475,10 @@ def handle_signal(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-
     waiting_for_signal[user_id] = True
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
     tf_list = "\n".join([f"• `{k}` ({v})" for k, v in TIMEFRAME_NAMES.items()])
-
     help_text = (
         "📈 **سیگنال معاملاتی**\n\n"
         "لطفاً **نماد** و **تایم‌فریم** مورد نظر را وارد کنید.\n\n"
@@ -1586,6 +1621,7 @@ def handle_gold_analysis(message):
     except:
         pass
 
+# ===== هندلر تحلیل دلار (به‌روز شده) =====
 @bot.message_handler(func=lambda msg: msg.text == "📊 تحلیل دلار")
 @rate_limited_handler
 def handle_forex_analysis(message):
@@ -1593,31 +1629,20 @@ def handle_forex_analysis(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل دلار (USD/IRT)... لطفاً صبر کنید.")
+    processing_msg = bot.send_message(user_id, "⏳ در حال تحلیل دلار (USD/IRT) در تایم‌فریم روزانه... لطفاً صبر کنید.")
     try:
-        forex_data = get_forex_prices()
-        if forex_data and 'دلار' in forex_data:
-            usd = forex_data['دلار']
-            price = usd['price']
-            change = usd.get('change', 0)
-            if change > 0:
-                trend = "صعودی"
-                suggestion = "احتمال ادامه رشد وجود دارد."
-            elif change < 0:
-                trend = "نزولی"
-                suggestion = "احتمال کاهش قیمت وجود دارد."
-            else:
-                trend = "خنثی"
-                suggestion = "قیمت بدون تغییر است."
-            msg = f"📊 **تحلیل دلار**\n\n"
-            msg += f"💰 قیمت فعلی: {price:,.0f} ریال\n"
-            msg += f"📈 تغییر ۲۴ ساعته: {change:+.2f}%\n"
-            msg += f"📉 روند کلی: {trend}\n"
-            msg += f"💡 پیشنهاد: {suggestion}\n\n"
-            msg += "این تحلیل بر اساس قیمت لحظه‌ای و تغییرات روزانه است و توصیه معاملاتی محسوب نمی‌شود."
-            bot.send_message(user_id, msg, parse_mode='Markdown')
+        # تحلیل تکنیکال کامل بر روی USDIRT
+        analysis_data, chart_img, error = generate_technical_analysis("USDIRT", '1d', 'irt')
+        if error:
+            bot.send_message(user_id, error, parse_mode='Markdown')
+        elif not analysis_data:
+            bot.send_message(user_id, "❌ تحلیل دلار در دسترس نیست.", parse_mode='Markdown')
         else:
-            bot.send_message(user_id, "❌ دریافت قیمت دلار ممکن نیست.")
+            msg = format_analysis_message(analysis_data)
+            if chart_img:
+                bot.send_photo(user_id, chart_img, caption=msg, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, msg, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Forex analysis error: {e}")
         bot.send_message(user_id, "❌ خطا در تحلیل دلار. لطفاً مجدداً تلاش کنید.")
@@ -1644,62 +1669,44 @@ def callback_price(call):
     reply = ""
 
     if data == "price_btc":
-        # برای بیت‌کوین از بایننس و سایر صرافی‌ها استفاده نمی‌کنیم، فقط از بیت‌پین؟
-        # اما فعلاً همان تابع قبلی را نگه می‌داریم (که از چندین منبع استفاده می‌کرد)
-        # برای سادگی، از همان تابع قبلی get_crypto_price استفاده می‌کنیم
-        try:
-            # باید یک تابع برای دریافت قیمت کریپتو از بیت‌پین اضافه کنیم
-            # اما برای جلوگیری از پیچیدگی، فعلاً همان تابع قبلی را نگه می‌داریم
-            info = get_crypto_price("BTC/USDT")
-            if info:
-                reply = f"₿ **BTC/USDT**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    reply += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}\n"
-                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                reply = "❌ قیمت BTC در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
-        except:
-            reply = "❌ خطا در دریافت قیمت BTC."
+        info = get_crypto_price("BTC/USDT")
+        if info:
+            reply = f"₿ **BTC/USDT**\n💰 قیمت: {info['price']:,.0f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.0f}\n📉 پایین: {info['low']:,.0f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        else:
+            reply = "❌ قیمت BTC در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
     elif data == "price_eth":
-        try:
-            info = get_crypto_price("ETH/USDT")
-            if info:
-                reply = f"⟠ **ETH/USDT**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
-                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                reply = "❌ قیمت ETH در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
-        except:
-            reply = "❌ خطا در دریافت قیمت ETH."
+        info = get_crypto_price("ETH/USDT")
+        if info:
+            reply = f"⟠ **ETH/USDT**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        else:
+            reply = "❌ قیمت ETH در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
     elif data == "price_usdt_dominance":
         reply = "📊 **USDT.D (Dominance)**\n💰 دامیننس: 6.8%\n📊 تغییر ۲۴h: 0.2%\n📌 منبع: تخمینی"
     elif data == "price_eurusd":
-        try:
-            info = get_crypto_price("EUR/USDT")
-            if info:
-                reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
-                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                reply = "❌ قیمت EUR/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
-        except:
-            reply = "❌ خطا در دریافت قیمت EUR/USD."
+        info = get_crypto_price("EUR/USDT")
+        if info:
+            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        else:
+            reply = "❌ قیمت EUR/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
     elif data == "price_gbpusd":
-        try:
-            info = get_crypto_price("GBP/USDT")
-            if info:
-                reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-                if info.get('high') and info.get('low'):
-                    reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
-                reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
-            else:
-                reply = "❌ قیمت GBP/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
-        except:
-            reply = "❌ خطا در دریافت قیمت GBP/USD."
+        info = get_crypto_price("GBP/USDT")
+        if info:
+            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('high') and info.get('low'):
+                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+        else:
+            reply = "❌ قیمت GBP/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
     elif data == "price_gold":
-        # قیمت طلا از بیت‌پین
         gold_data = get_gold_price_from_bitpin()
         if gold_data:
             price = gold_data['price']
@@ -1731,11 +1738,9 @@ def handle_text_messages(message):
     # ===== حالت سیگنال معاملاتی =====
     if waiting_for_signal.get(user_id):
         waiting_for_signal.pop(user_id, None)
-        
         parts = text.split()
         symbol = parts[0] if parts else ""
         timeframe = '1d'
-        
         if len(parts) > 1:
             tf_input = parts[1].lower()
             if tf_input in TIMEFRAME_MAP:
@@ -1751,8 +1756,7 @@ def handle_text_messages(message):
                 )
                 waiting_for_signal[user_id] = True
                 return
-        
-        if symbol not in ALL_VALID_SYMBOLS:
+        if symbol not in ALL_VALID_SYMBOLS and not symbol.endswith('IRT'):
             crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
             forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
             bot.send_message(
@@ -1772,9 +1776,14 @@ def handle_text_messages(message):
         )
 
         try:
-            is_crypto = symbol in VALID_CRYPTO_SYMBOLS
-            asset_type = 'crypto' if is_crypto else 'forex'
-            
+            # تشخیص نوع دارایی
+            if symbol.endswith('IRT'):
+                asset_type = 'irt'
+            elif symbol in VALID_CRYPTO_SYMBOLS:
+                asset_type = 'crypto'
+            else:
+                asset_type = 'forex'
+
             analysis_data, chart_img, error = generate_technical_analysis(symbol, timeframe, asset_type)
             if error:
                 bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1783,27 +1792,16 @@ def handle_text_messages(message):
             else:
                 signal_text = generate_crypto_signal(symbol, analysis_data)
                 if chart_img:
-                    bot.send_photo(
-                        user_id,
-                        chart_img,
-                        caption=signal_text,
-                        parse_mode='Markdown'
-                    )
+                    bot.send_photo(user_id, chart_img, caption=signal_text, parse_mode='Markdown')
                 else:
                     bot.send_message(user_id, signal_text, parse_mode='Markdown')
-
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
                 pass
-
         except Exception as e:
             logger.error(f"Error in signal processing: {e}")
-            bot.send_message(
-                user_id,
-                f"❌ خطا در تولید سیگنال برای `{symbol}`. لطفاً مجدداً تلاش کنید.",
-                parse_mode='Markdown'
-            )
+            bot.send_message(user_id, f"❌ خطا در تولید سیگنال برای `{symbol}`. لطفاً مجدداً تلاش کنید.", parse_mode='Markdown')
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
@@ -1835,23 +1833,14 @@ def handle_text_messages(message):
                 news_text = get_cached_news(text, limit=8, is_crypto=True)
             else:
                 news_text = get_cached_news(text, limit=8, is_crypto=False)
-            bot.send_message(
-                user_id,
-                news_text,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
+            bot.send_message(user_id, news_text, parse_mode='Markdown', disable_web_page_preview=True)
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
                 pass
         except Exception as e:
             logger.error(f"Error in news processing: {e}")
-            bot.send_message(
-                user_id,
-                f"❌ خطا در دریافت اخبار برای `{text}`. لطفاً مجدداً تلاش کنید.",
-                parse_mode='Markdown'
-            )
+            bot.send_message(user_id, f"❌ خطا در دریافت اخبار برای `{text}`. لطفاً مجدداً تلاش کنید.", parse_mode='Markdown')
             try:
                 bot.delete_message(user_id, processing_msg.message_id)
             except:
