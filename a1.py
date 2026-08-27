@@ -1284,8 +1284,9 @@ VALID_FOREX_SYMBOLS = {
 ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
 
 # ========== متغیرهای حالت ==========
-waiting_for_symbol = {}
-waiting_for_signal = {}
+waiting_for_symbol = {}       # برای اخبار
+waiting_for_signal = {}       # برای دریافت نماد سیگنال
+user_signal_symbol = {}       # ذخیره نماد انتخاب‌شده برای سیگنال
 
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
@@ -1526,7 +1527,7 @@ def analyze_step(message):
         except:
             pass
 
-# ---------- دکمه سیگنال معاملاتی ----------
+# ---------- دکمه سیگنال معاملاتی (NEW) ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 @rate_limited_handler
 def handle_signal(message):
@@ -1534,28 +1535,23 @@ def handle_signal(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-
+    # Clear previous state
     waiting_for_signal[user_id] = True
+    user_signal_symbol.pop(user_id, None)  # clear any old symbol
+    
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
-    tf_list = "\n".join([f"• `{k}` ({v})" for k, v in TIMEFRAME_NAMES.items()])
-
-    help_text = (
+    prompt = (
         "📈 **سیگنال معاملاتی**\n\n"
-        "لطفاً **نماد** و **تایم‌فریم** مورد نظر را وارد کنید.\n\n"
+        "لطفاً **نماد** مورد نظر را وارد کنید.\n\n"
         "🪙 **ارزهای دیجیتال:**\n"
         f"`{crypto_list}`\n\n"
-        "💱 **جفت‌ارزهای فارکس (با تحلیل تکنیکال):**\n"
+        "💱 **جفت‌ارزهای فارکس:**\n"
         f"`{forex_list}`\n\n"
-        "⏰ **تایم‌فریم‌های قابل انتخاب:**\n"
-        f"{tf_list}\n\n"
-        "📌 **نحوه ورود:**\n"
-        "`نماد تایم‌فریم`\n"
-        "مثال: `BTC 4h` یا `EURUSD 1h` یا `SOL 15m`\n\n"
-        "💡 در صورت وارد کردن فقط نماد (مثل `BTC`)، تایم‌فریم **روزانه (1d)** استفاده می‌شود.\n\n"
-        "⏳ پردازش ممکن است ۱۰-۱۵ ثانیه طول بکشد."
+        "📌 مثال: `BTC` یا `EURUSD`\n\n"
+        "پس از وارد کردن نماد، تایم‌فریم مورد نظر را انتخاب کنید."
     )
-    bot.send_message(user_id, help_text, parse_mode='Markdown')
+    bot.send_message(user_id, prompt, parse_mode='Markdown')
 
 # ---------- سایر دکمه‌ها ----------
 @bot.message_handler(func=lambda msg: msg.text == "🎯 پیشنهاد خرید")
@@ -1680,6 +1676,79 @@ def callback_back_main(call):
     bot.edit_message_text("به منوی اصلی برگشتید.", call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.send_message(call.message.chat.id, "🔽 از دکمه‌های زیر استفاده کنید:", reply_markup=main_menu_keyboard())
 
+# ---------- کالبک‌های انتخاب تایم‌فریم سیگنال ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith("signal_tf_"))
+@rate_limited_handler
+def callback_signal_tf(call):
+    user_id = call.from_user.id
+    tf = call.data.split("_")[2]  # e.g., signal_tf_1m -> "1m"
+    symbol = user_signal_symbol.get(user_id)
+    if not symbol:
+        bot.answer_callback_query(call.id, "❌ لطفاً ابتدا نماد را وارد کنید.", show_alert=True)
+        return
+    
+    # Confirm selection
+    bot.answer_callback_query(call.id, f"⏳ در حال تولید سیگنال برای {symbol} در تایم‌فریم {TIMEFRAME_NAMES.get(tf, tf)}...")
+    
+    processing_msg = bot.send_message(
+        user_id,
+        f"⏳ در حال تولید سیگنال برای **{symbol}** در تایم‌فریم **{TIMEFRAME_NAMES.get(tf, tf)}**... لطفاً صبر کنید.",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        is_crypto = symbol in VALID_CRYPTO_SYMBOLS
+        asset_type = 'crypto' if is_crypto else 'forex'
+        analysis_data, chart_img, error = generate_technical_analysis(symbol, tf, asset_type)
+        
+        if error:
+            bot.send_message(user_id, error, parse_mode='Markdown')
+        elif not analysis_data:
+            bot.send_message(
+                user_id,
+                f"❌ سیگنالی برای `{symbol}` در تایم‌فریم {TIMEFRAME_NAMES.get(tf, tf)} در دسترس نیست.",
+                parse_mode='Markdown'
+            )
+        else:
+            signal_text = generate_crypto_signal(symbol, analysis_data)
+            if chart_img:
+                bot.send_photo(user_id, chart_img, caption=signal_text, parse_mode='Markdown')
+            else:
+                bot.send_message(user_id, signal_text, parse_mode='Markdown')
+        
+        # Clear state after successful generation
+        user_signal_symbol.pop(user_id, None)
+        waiting_for_signal.pop(user_id, None)
+        
+        try:
+            bot.delete_message(user_id, processing_msg.message_id)
+        except:
+            pass
+            
+    except Exception as e:
+        logger.error(f"Error generating signal: {e}")
+        bot.send_message(
+            user_id,
+            f"❌ خطا در تولید سیگنال برای `{symbol}`. لطفاً مجدداً تلاش کنید.",
+            parse_mode='Markdown'
+        )
+        try:
+            bot.delete_message(user_id, processing_msg.message_id)
+        except:
+            pass
+    finally:
+        bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "signal_cancel")
+@rate_limited_handler
+def callback_signal_cancel(call):
+    user_id = call.from_user.id
+    user_signal_symbol.pop(user_id, None)
+    waiting_for_signal.pop(user_id, None)
+    bot.answer_callback_query(call.id, "❌ عملیات سیگنال لغو شد.")
+    bot.edit_message_text("❌ عملیات سیگنال لغو شد.", call.message.chat.id, call.message.message_id, reply_markup=None)
+    bot.send_message(call.message.chat.id, "🔽 منوی اصلی:", reply_markup=main_menu_keyboard())
+
 # ---------- هندلر پیام‌های متنی (برای دریافت نماد اخبار و سیگنال) ----------
 @bot.message_handler(func=lambda msg: True)
 @rate_limited_handler
@@ -1690,30 +1759,10 @@ def handle_text_messages(message):
         bot.reply_to(message, "❌ لطفاً یک متن معتبر وارد کنید.")
         return
 
-    # ===== حالت سیگنال معاملاتی =====
+    # ===== حالت سیگنال معاملاتی (درخواست نماد) =====
     if waiting_for_signal.get(user_id):
-        waiting_for_signal.pop(user_id, None)
-        
-        parts = text.split()
-        symbol = parts[0] if parts else ""
-        timeframe = '1d'
-        
-        if len(parts) > 1:
-            tf_input = parts[1].lower()
-            if tf_input in TIMEFRAME_MAP:
-                timeframe = TIMEFRAME_MAP[tf_input]
-            else:
-                tf_list = ", ".join([f"`{k}`" for k in TIMEFRAME_MAP.keys()])
-                bot.send_message(
-                    user_id,
-                    f"❌ تایم‌فریم `{tf_input}` معتبر نیست.\n\n"
-                    f"⏰ تایم‌فریم‌های معتبر:\n{tf_list}\n\n"
-                    f"📌 مثال: `BTC 4h` یا `ETH 1h`",
-                    parse_mode='Markdown'
-                )
-                waiting_for_signal[user_id] = True
-                return
-        
+        # We are waiting for symbol input
+        symbol = text
         if symbol not in ALL_VALID_SYMBOLS:
             crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
             forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
@@ -1724,52 +1773,29 @@ def handle_text_messages(message):
                 f"💱 جفت‌ارزهای فارکس:\n`{forex_list}`",
                 parse_mode='Markdown'
             )
-            waiting_for_signal[user_id] = True
+            # Keep waiting
             return
-
-        processing_msg = bot.send_message(
+        
+        # Valid symbol: store and show timeframe selection
+        user_signal_symbol[user_id] = symbol
+        waiting_for_signal.pop(user_id, None)  # clear waiting flag
+        
+        # Build inline keyboard with timeframes
+        keyboard = InlineKeyboardMarkup(row_width=3)
+        timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        for tf in timeframes:
+            keyboard.add(InlineKeyboardButton(
+                TIMEFRAME_NAMES.get(tf, tf),
+                callback_data=f"signal_tf_{tf}"
+            ))
+        keyboard.add(InlineKeyboardButton("🔙 لغو", callback_data="signal_cancel"))
+        
+        bot.send_message(
             user_id,
-            f"⏳ در حال تولید سیگنال برای **{symbol}** در تایم‌فریم **{TIMEFRAME_NAMES.get(timeframe, timeframe)}**... لطفاً صبر کنید.",
+            f"⏰ تایم‌فریم مورد نظر برای **{symbol}** را انتخاب کنید:",
+            reply_markup=keyboard,
             parse_mode='Markdown'
         )
-
-        try:
-            is_crypto = symbol in VALID_CRYPTO_SYMBOLS
-            asset_type = 'crypto' if is_crypto else 'forex'
-            
-            analysis_data, chart_img, error = generate_technical_analysis(symbol, timeframe, asset_type)
-            if error:
-                bot.send_message(user_id, error, parse_mode='Markdown')
-            elif not analysis_data:
-                bot.send_message(user_id, f"❌ سیگنالی برای این دارایی در تایم‌فریم انتخاب‌شده در دسترس نیست.", parse_mode='Markdown')
-            else:
-                signal_text = generate_crypto_signal(symbol, analysis_data)
-                if chart_img:
-                    bot.send_photo(
-                        user_id,
-                        chart_img,
-                        caption=signal_text,
-                        parse_mode='Markdown'
-                    )
-                else:
-                    bot.send_message(user_id, signal_text, parse_mode='Markdown')
-
-            try:
-                bot.delete_message(user_id, processing_msg.message_id)
-            except:
-                pass
-
-        except Exception as e:
-            logger.error(f"Error in signal processing: {e}")
-            bot.send_message(
-                user_id,
-                f"❌ خطا در تولید سیگنال برای `{symbol}`. لطفاً مجدداً تلاش کنید.",
-                parse_mode='Markdown'
-            )
-            try:
-                bot.delete_message(user_id, processing_msg.message_id)
-            except:
-                pass
         return
 
     # ===== حالت اخبار =====
