@@ -482,18 +482,26 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== دریافت داده‌های تاریخی فارکس ==========
+# ========== دریافت داده‌های تاریخی فارکس (اصلاح‌شده) ==========
 forex_cache = {}
 
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
     tf_map = {
         '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
-        '1h': '1h', '4h': '1h',
+        '1h': '1h', '4h': '1h',  # برای 4h از 1h استفاده می‌کنیم و سپس resample
         '1d': '1d'
     }
     yf_tf = tf_map.get(timeframe, '1d')
     
-    if timeframe == '4h':
+    # افزایش limit برای تایم‌فریم‌های کوچک
+    if timeframe in ['1m', '5m', '15m']:
+        limit = 500
+    elif timeframe in ['30m', '1h']:
+        limit = 300
+    elif timeframe == '4h':
+        limit = 200
+        # برای 4h، داده 1h می‌گیریم و بعد resample می‌کنیم، پس limit را *4 می‌کنیم تا به تعداد کافی برسیم
+        yf_tf = '1h'
         limit = limit * 4
     
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
@@ -504,12 +512,26 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
     
     try:
         ticker = yf.Ticker(f"{symbol}=X")
-        df = ticker.history(period=f"{limit*2 if yf_tf=='1m' else limit}d", interval=yf_tf)
+        # دریافت همه داده‌های موجود
+        df = ticker.history(period="max", interval=yf_tf)
         if df.empty:
             logger.warning(f"No data for {symbol}")
             return None
         
+        # اگر تایم‌فریم 4h باشد، resample به 4 ساعت
+        if timeframe == '4h':
+            df = df.resample('4H').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+        
+        # محدود کردن به تعداد limit
         df = df.tail(limit)
+        if df.empty:
+            return None
         
         dates = df.index.to_pydatetime()
         opens = df['Open'].values
@@ -736,12 +758,13 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
         else:
-            if timeframe in ['1m', '5m']:
-                limit = 80
-            elif timeframe in ['15m', '30m']:
-                limit = 120
+            # تنظیم limit برای فارکس
+            if timeframe in ['1m', '5m', '15m']:
+                limit = 500
+            elif timeframe in ['30m', '1h']:
+                limit = 300
             else:
-                limit = 180
+                limit = 200
                 
             data = get_forex_historical_data(symbol, timeframe, limit)
             if data is None or data.get('close') is None or len(data['close']) < 30:
