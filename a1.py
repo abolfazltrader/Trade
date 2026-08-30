@@ -19,10 +19,10 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 import pandas as pd
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.trend import EMAIndicator, MACD, ADXIndicator, IchimokuIndicator, PSARIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator, CCIIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
-from ta.volume import MFIIndicator
+from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
 import yfinance as yf
 
 # ---------- تنظیمات امنیتی و محیطی ----------
@@ -37,15 +37,12 @@ BASE_URL = os.environ.get("BASE_URL", "https://trade-i4js.onrender.com")
 ADMIN_IDS_ENV = os.environ.get("ADMIN_IDS", "6542890217")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()]
 
-# تنظیمات Rate Limiting (تعداد درخواست در دقیقه برای هر کاربر)
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", 20))
-RATE_LIMIT_PERIOD = 60  # ثانیه
+RATE_LIMIT_PERIOD = 60
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
-
-# غیرفعال کردن debug در محیط تولید
 app.debug = False
 
 logging.basicConfig(
@@ -55,25 +52,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------- Rate Limiter ----------
-rate_limit_store = {}  # {user_id: [timestamps]}
-rate_limit_lock = None  # برای سادگی از threading.Lock استفاده می‌کنیم
+rate_limit_store = {}
 import threading
 rate_limit_lock = threading.Lock()
 
 def is_rate_limited(user_id):
-    """بررسی محدودیت نرخ درخواست برای کاربر"""
     now = time.time()
     with rate_limit_lock:
         if user_id not in rate_limit_store:
             rate_limit_store[user_id] = []
-        # حذف زمان‌های قدیمی‌تر از دوره
         rate_limit_store[user_id] = [t for t in rate_limit_store[user_id] if now - t < RATE_LIMIT_PERIOD]
         if len(rate_limit_store[user_id]) >= RATE_LIMIT_REQUESTS:
             return True
         rate_limit_store[user_id].append(now)
         return False
 
-# ---------- امنیت Webhook ----------
 @app.before_request
 def check_webhook_secret():
     if request.path == '/webhook':
@@ -82,7 +75,6 @@ def check_webhook_secret():
             logger.warning("Unauthorized webhook request (invalid secret)")
             return jsonify({"status": "unauthorized"}), 401
 
-# ---------- دیتابیس با مدیریت context ----------
 def get_db_connection():
     conn = sqlite3.connect("trading_bot.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -109,7 +101,6 @@ def init_db():
 
 init_db()
 
-# ---------- توابع کمکی با امنیت بیشتر ----------
 def get_user_expiry(user_id):
     with get_db_connection() as conn:
         c = conn.cursor()
@@ -144,16 +135,14 @@ def get_owner_name(user_id):
         return "کاربر"
 
 def safe_symbol(symbol):
-    """اعتبارسنجی و پاکسازی نماد"""
     if not symbol:
         return None
     symbol = symbol.strip().upper()
-    # فقط حروف، اعداد و اسلش مجاز
     if not re.match(r'^[A-Z0-9/]+$', symbol):
         return None
     return symbol
 
-# ========== سیستم دریافت قیمت (بدون تغییر امنیتی خاص) ==========
+# ========== سیستم دریافت قیمت ==========
 class PriceFetcher:
     def __init__(self):
         self.cache = {}
@@ -330,7 +319,6 @@ class PriceFetcher:
 
 fetcher = PriceFetcher()
 
-# ---------- توابع عمومی دریافت قیمت (بدون تغییر) ----------
 def get_crypto_price(symbol="BTC/USDT"):
     return fetcher.get_crypto_price(symbol)
 
@@ -413,7 +401,7 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ---------- توابع ترجمه (بدون تغییر) ----------
+# ---------- ترجمه ----------
 translation_cache = {}
 
 def translate_to_persian(text):
@@ -482,64 +470,66 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== دریافت داده‌های تاریخی فارکس (اصلاح‌شده) ==========
+# ========== دریافت داده‌های تاریخی فارکس (اصلاح‌شده با resample) ==========
 forex_cache = {}
 
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
-    tf_map = {
-        '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
-        '1h': '1h', '4h': '1h',  # برای 4h از 1h استفاده می‌کنیم و سپس resample
-        '1d': '1d'
-    }
-    yf_tf = tf_map.get(timeframe, '1d')
-    
-    # افزایش limit برای تایم‌فریم‌های کوچک
-    if timeframe in ['1m', '5m', '15m']:
-        limit = 500
-    elif timeframe in ['30m', '1h']:
-        limit = 300
+    # تنظیمات interval و دوره بر اساس تایم‌فریم
+    if timeframe in ['1m', '5m', '15m', '30m', '1h']:
+        base_interval = '1m'
+        multiplier = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60}.get(timeframe, 1)
+        needed_points = limit * multiplier
+        needed_points = min(needed_points, 5000)  # محدودیت برای جلوگیری از حجم زیاد
+        period = 'max'
     elif timeframe == '4h':
-        limit = 200
-        # برای 4h، داده 1h می‌گیریم و بعد resample می‌کنیم، پس limit را *4 می‌کنیم تا به تعداد کافی برسیم
-        yf_tf = '1h'
-        limit = limit * 4
-    
+        base_interval = '1h'
+        needed_points = limit * 4
+        period = 'max'
+    else:  # '1d'
+        base_interval = '1d'
+        needed_points = limit
+        period = 'max'
+
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
     if cache_key in forex_cache:
         data, timestamp = forex_cache[cache_key]
         if (datetime.now() - timestamp).seconds < 600:
             return data
-    
+
     try:
         ticker = yf.Ticker(f"{symbol}=X")
-        # دریافت همه داده‌های موجود
-        df = ticker.history(period="max", interval=yf_tf)
+        df = ticker.history(period=period, interval=base_interval)
         if df.empty:
             logger.warning(f"No data for {symbol}")
             return None
-        
-        # اگر تایم‌فریم 4h باشد، resample به 4 ساعت
-        if timeframe == '4h':
-            df = df.resample('4H').agg({
-                'Open': 'first',
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last',
-                'Volume': 'sum'
-            }).dropna()
-        
-        # محدود کردن به تعداد limit
-        df = df.tail(limit)
-        if df.empty:
+
+        # Resample در صورت نیاز
+        if timeframe != base_interval:
+            resample_rule = {
+                '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
+                '1h': '1H', '4h': '4H'
+            }.get(timeframe)
+            if resample_rule:
+                df = df.resample(resample_rule).agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+
+        df = df.tail(needed_points)
+        if len(df) < 30:
+            logger.warning(f"Not enough data after resample for {symbol} {timeframe}")
             return None
-        
+
         dates = df.index.to_pydatetime()
         opens = df['Open'].values
         highs = df['High'].values
         lows = df['Low'].values
         closes = df['Close'].values
         volumes = df['Volume'].values
-        
+
         data = {
             'dates': dates,
             'open': np.array(opens),
@@ -549,13 +539,37 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
             'volume': np.array(volumes)
         }
         forex_cache[cache_key] = (data, datetime.now())
-        logger.info(f"Forex historical data fetched for {symbol} ({timeframe})")
+        logger.info(f"Forex data fetched for {symbol} ({timeframe}) - {len(dates)} candles")
         return data
     except Exception as e:
         logger.error(f"Error fetching forex data for {symbol}: {e}")
+        # Fallback به داده‌های روزانه
+        try:
+            df = ticker.history(period="max", interval="1d")
+            if not df.empty:
+                df = df.tail(limit)
+                dates = df.index.to_pydatetime()
+                opens = df['Open'].values
+                highs = df['High'].values
+                lows = df['Low'].values
+                closes = df['Close'].values
+                volumes = df['Volume'].values
+                data = {
+                    'dates': dates,
+                    'open': np.array(opens),
+                    'high': np.array(highs),
+                    'low': np.array(lows),
+                    'close': np.array(closes),
+                    'volume': np.array(volumes)
+                }
+                forex_cache[cache_key] = (data, datetime.now())
+                logger.info(f"Forex data fallback to daily for {symbol}")
+                return data
+        except:
+            pass
         return None
 
-# ========== توابع تحلیل تکنیکال (بدون تغییر) ==========
+# ========== توابع تحلیل تکنیکال فوق‌پیشرفته ==========
 def calculate_indicators(data):
     df = pd.DataFrame({
         'high': data['high'],
@@ -564,6 +578,7 @@ def calculate_indicators(data):
         'volume': data['volume']
     })
     
+    # اندیکاتورهای پایه
     df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
     df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
     df['RSI'] = RSIIndicator(close=df['close'], window=14).rsi()
@@ -585,6 +600,25 @@ def calculate_indicators(data):
     df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
     df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
     
+    # اندیکاتورهای پیشرفته جدید
+    try:
+        ichimoku = IchimokuIndicator(high=df['high'], low=df['low'], window1=9, window2=26, window3=52)
+        df['tenkan'] = ichimoku.ichimoku_conversion_line()
+        df['kijun'] = ichimoku.ichimoku_base_line()
+        df['senkou_a'] = ichimoku.ichimoku_a()
+        df['senkou_b'] = ichimoku.ichimoku_b()
+    except Exception as e:
+        logger.warning(f"Ichimoku calculation failed: {e}")
+        df['tenkan'] = np.nan
+        df['kijun'] = np.nan
+        df['senkou_a'] = np.nan
+        df['senkou_b'] = np.nan
+    
+    df['CCI'] = CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
+    df['OBV'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume()
+    psar = PSARIndicator(high=df['high'], low=df['low'], close=df['close'], step=0.02, max_step=0.2)
+    df['PSAR'] = psar.psar()
+    
     return df
 
 def find_support_resistance(data, lookback=50):
@@ -595,6 +629,9 @@ def find_support_resistance(data, lookback=50):
 def generate_trading_signal(data, indicators):
     last = indicators.iloc[-1]
     buy_conditions = 0
+    sell_conditions = 0
+    
+    # شرایط خرید (۸ مورد قبلی)
     if last['close'] > last['EMA_200']:
         buy_conditions += 1
     if last['close'] > last['EMA_100']:
@@ -611,8 +648,8 @@ def generate_trading_signal(data, indicators):
         buy_conditions += 1
     if last['MFI'] > 50:
         buy_conditions += 1
-
-    sell_conditions = 0
+    
+    # شرایط فروش (۸ مورد قبلی)
     if last['close'] < last['EMA_200']:
         sell_conditions += 1
     if last['close'] < last['EMA_100']:
@@ -629,13 +666,40 @@ def generate_trading_signal(data, indicators):
         sell_conditions += 1
     if last['MFI'] < 50:
         sell_conditions += 1
-
-    total_conditions = 8
-    if buy_conditions >= 5:
+    
+    # شرایط جدید با اندیکاتورهای پیشرفته
+    # Ichimoku: اگر قیمت بالای ابر باشد -> صعودی
+    if not np.isnan(last['senkou_a']) and not np.isnan(last['senkou_b']):
+        if last['close'] > max(last['senkou_a'], last['senkou_b']):
+            buy_conditions += 1
+        elif last['close'] < min(last['senkou_a'], last['senkou_b']):
+            sell_conditions += 1
+    
+    # CCI: زیر 100- oversold, بالای 100+ overbought
+    if last['CCI'] < -100:
+        buy_conditions += 1
+    elif last['CCI'] > 100:
+        sell_conditions += 1
+    
+    # OBV: روند صعودی حجم
+    if len(indicators['OBV']) > 1:
+        if indicators['OBV'].iloc[-1] > indicators['OBV'].iloc[-2]:
+            buy_conditions += 1
+        else:
+            sell_conditions += 1
+    
+    # PSAR: اگر قیمت بالای PSAR باشد -> صعودی
+    if last['close'] > last['PSAR']:
+        buy_conditions += 1
+    else:
+        sell_conditions += 1
+    
+    total_conditions = 12
+    if buy_conditions >= 7:
         signal = 'long'
         trend = 'صعودی'
         score = round(7 + (buy_conditions / total_conditions) * 3, 1)
-    elif sell_conditions >= 5:
+    elif sell_conditions >= 7:
         signal = 'short'
         trend = 'نزولی'
         score = round(7 + (sell_conditions / total_conditions) * 3, 1)
@@ -648,7 +712,7 @@ def generate_trading_signal(data, indicators):
 
 def determine_context(data):
     last = data['close'][-1]
-    prev = data['close'][-2]
+    prev = data['close'][-2] if len(data['close']) > 1 else last
     if last > prev:
         return "صعودی"
     elif last < prev:
@@ -658,16 +722,17 @@ def determine_context(data):
 
 def calculate_rrr(data, signal):
     last = data['close'][-1]
-    recent_high = np.max(data['high'][-20:])
-    recent_low = np.min(data['low'][-20:])
+    atr = np.mean(np.abs(data['high'][-14:] - data['low'][-14:]))
+    if atr == 0:
+        atr = 0.001
     if signal == 'long':
         entry = last
-        stop_loss = recent_low
-        take_profit = recent_high
+        stop_loss = last - atr * 1.5
+        take_profit = last + atr * 2.5
     elif signal == 'short':
         entry = last
-        stop_loss = recent_high
-        take_profit = recent_low
+        stop_loss = last + atr * 1.5
+        take_profit = last - atr * 2.5
     else:
         return 0
     risk = abs(entry - stop_loss)
@@ -701,6 +766,17 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Upper')
         ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Middle')
         ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Lower')
+        
+        # رسم Ichimoku Cloud
+        if 'senkou_a' in indicators.columns and not indicators['senkou_a'].isna().all():
+            ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
+                             where=(indicators['senkou_a'] >= indicators['senkou_b']), 
+                             facecolor='green', alpha=0.1, interpolate=True)
+            ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
+                             where=(indicators['senkou_a'] < indicators['senkou_b']), 
+                             facecolor='red', alpha=0.1, interpolate=True)
+            ax1.plot(dates, indicators['tenkan'], color='orange', linewidth=1, alpha=0.5, label='Tenkan')
+            ax1.plot(dates, indicators['kijun'], color='magenta', linewidth=1, alpha=0.5, label='Kijun')
         
         ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
         ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
@@ -758,11 +834,11 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
         else:
-            # تنظیم limit برای فارکس
+            # تنظیم limit برای فارکس (افزایش یافته)
             if timeframe in ['1m', '5m', '15m']:
-                limit = 500
-            elif timeframe in ['30m', '1h']:
                 limit = 300
+            elif timeframe in ['30m', '1h']:
+                limit = 250
             else:
                 limit = 200
                 
@@ -784,13 +860,27 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
         
         if score >= 8 and rrr > 2:
             status = "✅ مناسب برای ورود"
-        elif score >= 6 and rrr > 1.5:
+        elif score >= 7 and rrr > 1.5:
             status = "⏳ منتظر تایید"
         else:
             status = "⏰ فرصت گذشته – منتظر موقعیت بعدی"
         
         signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
         signal_persian = signal_map.get(signal_type, 'نامشخص')
+        
+        # محاسبه سطوح فیبوناچی
+        high_swing = np.max(data['high'][-50:])
+        low_swing = np.min(data['low'][-50:])
+        diff = high_swing - low_swing
+        fib_levels = {
+            '0.0': low_swing,
+            '0.236': low_swing + 0.236 * diff,
+            '0.382': low_swing + 0.382 * diff,
+            '0.5': low_swing + 0.5 * diff,
+            '0.618': low_swing + 0.618 * diff,
+            '0.786': low_swing + 0.786 * diff,
+            '1.0': high_swing
+        }
         
         analysis_data = {
             'symbol': symbol,
@@ -810,7 +900,10 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             'atr': atr,
             'rsi': indicators['RSI'].iloc[-1] if not np.isnan(indicators['RSI'].iloc[-1]) else 0,
             'macd': indicators['MACD'].iloc[-1] if not np.isnan(indicators['MACD'].iloc[-1]) else 0,
-            'bb_position': 'بالای میانگین' if data['close'][-1] > indicators['BB_middle'].iloc[-1] else 'زیر میانگین'
+            'bb_position': 'بالای میانگین' if data['close'][-1] > indicators['BB_middle'].iloc[-1] else 'زیر میانگین',
+            'fib_levels': fib_levels,
+            'adx': indicators['ADX'].iloc[-1] if not np.isnan(indicators['ADX'].iloc[-1]) else 0,
+            'cci': indicators['CCI'].iloc[-1] if not np.isnan(indicators['CCI'].iloc[-1]) else 0
         }
         
         chart_img = None
@@ -827,41 +920,67 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
 def format_analysis_message(data):
     if not data:
         return "❌ اطلاعات کافی برای تحلیل وجود ندارد."
-    msg = f"📊 **تحلیل تکنیکال {data['symbol']}**\n\n"
+    msg = f"📊 **تحلیل تکنیکال فوق‌پیشرفته {data['symbol']}**\n\n"
     msg += f"### 1. خلاصه کلی\n"
     msg += f"- **زمینه روزانه:** {data['context']}\n"
     msg += f"- **روند اصلی:** {data['trend']}\n"
     msg += f"- **حمایت کلیدی:** {data['support']:,.2f}\n"
     msg += f"- **مقاومت کلیدی:** {data['resistance']:,.2f}\n"
     msg += f"- **نوع سیگنال:** {data['signal']}\n"
-    msg += f"- **امتیاز کیفیت ستاپ:** {data['score']}\n"
+    msg += f"- **امتیاز کیفیت ستاپ:** {data['score']}/10\n"
     msg += f"- **کیفیت رویداد (R:R):** {data['rrr']}\n"
     msg += f"- **سطح ریسک (حد ضرر):** {data['risk']}\n"
     msg += f"- **وضعیت اجرا:** {data['status']}\n\n"
+    
+    fib = data.get('fib_levels', {})
+    if fib:
+        msg += f"### 2. سطوح فیبوناچی (۵۰ دوره اخیر)\n"
+        msg += f"- 0.0 (پایین): {fib['0.0']:,.2f}\n"
+        msg += f"- 0.236: {fib['0.236']:,.2f}\n"
+        msg += f"- 0.382: {fib['0.382']:,.2f}\n"
+        msg += f"- 0.5: {fib['0.5']:,.2f}\n"
+        msg += f"- 0.618: {fib['0.618']:,.2f}\n"
+        msg += f"- 0.786: {fib['0.786']:,.2f}\n"
+        msg += f"- 1.0 (بالا): {fib['1.0']:,.2f}\n\n"
+    
     if data['signal'] == 'لانگ':
         msg += f"**تحلیل:**\n"
         msg += f"قیمت {data['symbol']} با شکست مقاومت {data['resistance']:,.2f} وارد فاز صعودی شده است. "
         msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
         msg += f"پتانسیل رشد تا سطح {data['resistance'] + (data['resistance'] - data['support']):,.2f} وجود دارد. "
         msg += f"حد ضرر در صورت نزول قیمت به زیر {data['support']:,.2f} توصیه می‌شود.\n\n"
+        msg += f"🎯 **نقاط ورود:** {data['last_price']:,.2f} (قیمت فعلی)\n"
+        msg += f"🛑 **حد ضرر:** {data['support']:,.2f}\n"
+        msg += f"🏆 **حد سود:** {data['resistance'] + (data['resistance'] - data['support']):,.2f}\n\n"
     elif data['signal'] == 'شورت':
         msg += f"**تحلیل:**\n"
         msg += f"قیمت {data['symbol']} با شکست حمایت {data['support']:,.2f} وارد فاز نزولی شده است. "
         msg += f"با توجه به امتیاز {data['score']} و نسبت ریسک به ریوارد {data['rrr']}، "
         msg += f"پتانسیل کاهش تا سطح {data['support'] - (data['resistance'] - data['support']):,.2f} وجود دارد. "
         msg += f"حد ضرر در صورت صعود قیمت به بالای {data['resistance']:,.2f} توصیه می‌شود.\n\n"
+        msg += f"🎯 **نقاط ورود:** {data['last_price']:,.2f} (قیمت فعلی)\n"
+        msg += f"🛑 **حد ضرر:** {data['resistance']:,.2f}\n"
+        msg += f"🏆 **حد سود:** {data['support'] - (data['resistance'] - data['support']):,.2f}\n\n"
     else:
         msg += f"**تحلیل:**\n"
         msg += f"بازار در حالت خنثی قرار دارد. پیشنهاد می‌شود منتظر شکست یکی از سطوح {data['support']:,.2f} یا {data['resistance']:,.2f} باشید.\n\n"
+    
+    msg += f"### 3. وضعیت اندیکاتورها\n"
+    msg += f"- RSI: {data['rsi']:.1f} ({'اشباع خرید' if data['rsi'] > 70 else 'اشباع فروش' if data['rsi'] < 30 else 'خنثی'})\n"
+    msg += f"- MACD: {data['macd']:.2f} ({'صعودی' if data['macd'] > 0 else 'نزولی'})\n"
+    msg += f"- باند بولینگر: {data['bb_position']}\n"
+    msg += f"- ADX: {data.get('adx', 0):.1f} ({'روند قوی' if data.get('adx', 0) > 25 else 'روند ضعیف'})\n"
+    msg += f"- CCI: {data.get('cci', 0):.1f}\n"
+    msg += f"- ATR: {data['atr']:.4f} (نوسان)\n\n"
+    
     msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر کریپتو با هوش مصنوعی"
     return msg
 
-# ========== توابع تولید سیگنال ==========
 def generate_crypto_signal(symbol, analysis_data):
     if not analysis_data:
         return "❌ داده‌های کافی برای تولید سیگنال وجود ندارد."
 
-    signal = f"📈 **سیگنال معاملاتی {symbol}**\n\n"
+    signal = f"📈 **سیگنال معاملاتی فوق‌پیشرفته {symbol}**\n\n"
     signal += f"⏰ **تایم‌فریم:** {analysis_data['timeframe']}\n"
     signal += f"🔹 **نوع معامله:** {analysis_data['signal']}\n"
     signal += f"💰 **قیمت ورود (ورود):** {analysis_data['last_price']:,.2f} $\n"
@@ -869,7 +988,7 @@ def generate_crypto_signal(symbol, analysis_data):
     if analysis_data['signal'] == 'لانگ':
         atr = analysis_data.get('atr', 0)
         if atr > 0:
-            tp = analysis_data['last_price'] + atr * 2
+            tp = analysis_data['last_price'] + atr * 2.5
             sl = analysis_data['last_price'] - atr * 1.5
         else:
             tp = analysis_data['resistance'] + (analysis_data['resistance'] - analysis_data['support']) * 0.5
@@ -879,7 +998,7 @@ def generate_crypto_signal(symbol, analysis_data):
     elif analysis_data['signal'] == 'شورت':
         atr = analysis_data.get('atr', 0)
         if atr > 0:
-            tp = analysis_data['last_price'] - atr * 2
+            tp = analysis_data['last_price'] - atr * 2.5
             sl = analysis_data['last_price'] + atr * 1.5
         else:
             tp = analysis_data['support'] - (analysis_data['resistance'] - analysis_data['support']) * 0.5
@@ -1550,7 +1669,7 @@ def analyze_step(message):
         except:
             pass
 
-# ---------- دکمه سیگنال معاملاتی (NEW) ----------
+# ---------- دکمه سیگنال معاملاتی ----------
 @bot.message_handler(func=lambda msg: msg.text == "📈 سیگنال معاملاتی")
 @rate_limited_handler
 def handle_signal(message):
@@ -1558,9 +1677,8 @@ def handle_signal(message):
     if is_user_expired(user_id):
         bot.send_message(user_id, "⏰ دوره آزمایشی شما به پایان رسیده.")
         return
-    # Clear previous state
     waiting_for_signal[user_id] = True
-    user_signal_symbol.pop(user_id, None)  # clear any old symbol
+    user_signal_symbol.pop(user_id, None)
     
     crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
     forex_list = ", ".join(sorted(VALID_FOREX_SYMBOLS))
@@ -1704,13 +1822,12 @@ def callback_back_main(call):
 @rate_limited_handler
 def callback_signal_tf(call):
     user_id = call.from_user.id
-    tf = call.data.split("_")[2]  # e.g., signal_tf_1m -> "1m"
+    tf = call.data.split("_")[2]
     symbol = user_signal_symbol.get(user_id)
     if not symbol:
         bot.answer_callback_query(call.id, "❌ لطفاً ابتدا نماد را وارد کنید.", show_alert=True)
         return
     
-    # Confirm selection
     bot.answer_callback_query(call.id, f"⏳ در حال تولید سیگنال برای {symbol} در تایم‌فریم {TIMEFRAME_NAMES.get(tf, tf)}...")
     
     processing_msg = bot.send_message(
@@ -1739,7 +1856,6 @@ def callback_signal_tf(call):
             else:
                 bot.send_message(user_id, signal_text, parse_mode='Markdown')
         
-        # Clear state after successful generation
         user_signal_symbol.pop(user_id, None)
         waiting_for_signal.pop(user_id, None)
         
@@ -1784,7 +1900,6 @@ def handle_text_messages(message):
 
     # ===== حالت سیگنال معاملاتی (درخواست نماد) =====
     if waiting_for_signal.get(user_id):
-        # We are waiting for symbol input
         symbol = text
         if symbol not in ALL_VALID_SYMBOLS:
             crypto_list = ", ".join(sorted(VALID_CRYPTO_SYMBOLS))
@@ -1796,14 +1911,11 @@ def handle_text_messages(message):
                 f"💱 جفت‌ارزهای فارکس:\n`{forex_list}`",
                 parse_mode='Markdown'
             )
-            # Keep waiting
             return
         
-        # Valid symbol: store and show timeframe selection
         user_signal_symbol[user_id] = symbol
-        waiting_for_signal.pop(user_id, None)  # clear waiting flag
+        waiting_for_signal.pop(user_id, None)
         
-        # Build inline keyboard with timeframes
         keyboard = InlineKeyboardMarkup(row_width=3)
         timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
         for tf in timeframes:
@@ -1901,7 +2013,6 @@ def set_webhook():
     bot.remove_webhook()
     time.sleep(1)
     webhook_url = f"{BASE_URL}/webhook"
-    # تنظیم secret token برای امنیت بیشتر
     if bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET):
         logger.info(f"Webhook set to {webhook_url} with secret token")
     else:
