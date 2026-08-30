@@ -470,7 +470,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== دریافت داده‌های تاریخی فارکس (اصلاح‌شده با resample) ==========
+# ========== دریافت داده‌های تاریخی فارکس (با resample) ==========
 forex_cache = {}
 
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
@@ -1019,7 +1019,7 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار (بدون تغییر) ==========
+# ========== توابع اخبار ==========
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -2018,7 +2018,13 @@ def set_webhook():
     else:
         logger.error("Webhook setting failed")
 
+# اجرای Webhook در زمان راه‌اندازی (قبل از شروع Gunicorn)
+set_webhook()
+
+# ---------- نقطه‌ی ورود برای Gunicorn ----------
+# متغیر 'app' از قبل تعریف شده است. Gunicorn به آن دسترسی دارد.
+
+# اگر به‌صورت مستقیم اجرا شود (برای تست محلی):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    set_webhook()
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
