@@ -40,6 +40,9 @@ ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdig
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", 20))
 RATE_LIMIT_PERIOD = 60
 
+# API Key اختیاری برای CryptoPanic (برای رفع خطای 403)
+CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
+
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
@@ -470,7 +473,7 @@ def get_historical_data_multi(symbol="BTC/USDT", timeframe='1d', limit=200):
     
     return None
 
-# ========== دریافت داده‌های تاریخی فارکس (با resample) ==========
+# ========== دریافت داده‌های تاریخی فارکس (نسخه مقاوم) ==========
 forex_cache = {}
 
 def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
@@ -478,8 +481,7 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
     if timeframe in ['1m', '5m', '15m', '30m', '1h']:
         base_interval = '1m'
         multiplier = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60}.get(timeframe, 1)
-        needed_points = limit * multiplier
-        needed_points = min(needed_points, 5000)  # محدودیت برای جلوگیری از حجم زیاد
+        needed_points = min(limit * multiplier, 5000)
         period = 'max'
     elif timeframe == '4h':
         base_interval = '1h'
@@ -496,58 +498,66 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         if (datetime.now() - timestamp).seconds < 600:
             return data
 
+    # تلاش با Yahoo Finance
     try:
-        ticker = yf.Ticker(f"{symbol}=X")
-        df = ticker.history(period=period, interval=base_interval)
-        if df.empty:
-            logger.warning(f"No data for {symbol}")
-            return None
+        # تنظیم session با User-Agent مناسب
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        
+        # لیست فرمت‌های مختلف ticker
+        ticker_formats = [
+            f"{symbol}=X",
+            symbol,
+            f"{symbol[:3]}{symbol[3:]}=X",
+            f"EURUSD=X" if symbol == "EURUSD" else None
+        ]
+        ticker_formats = [t for t in ticker_formats if t is not None]
+        
+        df = None
+        for tfmt in ticker_formats:
+            try:
+                ticker = yf.Ticker(tfmt)
+                ticker._session = session
+                df = ticker.history(period=period, interval=base_interval)
+                if not df.empty:
+                    logger.info(f"Yahoo data fetched for {symbol} using ticker {tfmt}")
+                    break
+            except:
+                continue
+        
+        # اگر هیچ داده‌ای نیامد، با period کوتاه‌تر امتحان کن
+        if df is None or df.empty:
+            for tfmt in ticker_formats:
+                try:
+                    ticker = yf.Ticker(tfmt)
+                    ticker._session = session
+                    df = ticker.history(period="6mo", interval=base_interval)
+                    if not df.empty:
+                        logger.info(f"Yahoo data fetched (6mo) for {symbol} using ticker {tfmt}")
+                        break
+                except:
+                    continue
+        
+        if df is not None and not df.empty:
+            # Resample در صورت نیاز
+            if timeframe != base_interval:
+                resample_rule = {
+                    '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
+                    '1h': '1H', '4h': '4H'
+                }.get(timeframe)
+                if resample_rule:
+                    df = df.resample(resample_rule).agg({
+                        'Open': 'first',
+                        'High': 'max',
+                        'Low': 'min',
+                        'Close': 'last',
+                        'Volume': 'sum'
+                    }).dropna()
 
-        # Resample در صورت نیاز
-        if timeframe != base_interval:
-            resample_rule = {
-                '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
-                '1h': '1H', '4h': '4H'
-            }.get(timeframe)
-            if resample_rule:
-                df = df.resample(resample_rule).agg({
-                    'Open': 'first',
-                    'High': 'max',
-                    'Low': 'min',
-                    'Close': 'last',
-                    'Volume': 'sum'
-                }).dropna()
-
-        df = df.tail(needed_points)
-        if len(df) < 30:
-            logger.warning(f"Not enough data after resample for {symbol} {timeframe}")
-            return None
-
-        dates = df.index.to_pydatetime()
-        opens = df['Open'].values
-        highs = df['High'].values
-        lows = df['Low'].values
-        closes = df['Close'].values
-        volumes = df['Volume'].values
-
-        data = {
-            'dates': dates,
-            'open': np.array(opens),
-            'high': np.array(highs),
-            'low': np.array(lows),
-            'close': np.array(closes),
-            'volume': np.array(volumes)
-        }
-        forex_cache[cache_key] = (data, datetime.now())
-        logger.info(f"Forex data fetched for {symbol} ({timeframe}) - {len(dates)} candles")
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching forex data for {symbol}: {e}")
-        # Fallback به داده‌های روزانه
-        try:
-            df = ticker.history(period="max", interval="1d")
-            if not df.empty:
-                df = df.tail(limit)
+            df = df.tail(needed_points)
+            if len(df) >= 30:
                 dates = df.index.to_pydatetime()
                 opens = df['Open'].values
                 highs = df['High'].values
@@ -563,11 +573,62 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
                     'volume': np.array(volumes)
                 }
                 forex_cache[cache_key] = (data, datetime.now())
-                logger.info(f"Forex data fallback to daily for {symbol}")
+                logger.info(f"Forex data fetched for {symbol} ({timeframe}) - {len(dates)} candles")
                 return data
-        except:
-            pass
-        return None
+    except Exception as e:
+        logger.warning(f"Yahoo Finance failed for {symbol}: {e}")
+
+    # Fallback: استفاده از Frankfurter API برای داده‌های روزانه (فقط Close)
+    if timeframe == '1d':
+        try:
+            # استخراج ارز مبدأ و مقصد از نماد (مثلاً EURUSD -> EUR, USD)
+            if len(symbol) == 6:
+                from_currency = symbol[:3]
+                to_currency = symbol[3:6]
+            else:
+                # برای نمادهای با طول متفاوت (مثلاً USDJPY -> USD, JPY)
+                from_currency = symbol[:3]
+                to_currency = symbol[3:] if len(symbol) > 3 else "USD"
+            
+            # دریافت داده‌های ۳۰ روز اخیر
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=limit*2)).strftime('%Y-%m-%d')
+            url = f"https://api.frankfurter.app/{start_date}..{end_date}?from={from_currency}&to={to_currency}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and 'rates' in data:
+                    rates = data['rates']
+                    dates_rates = sorted(rates.keys())
+                    closes = []
+                    for dt in dates_rates:
+                        val = rates[dt].get(to_currency)
+                        if val is not None:
+                            closes.append(float(val))
+                    if closes:
+                        dates = [datetime.strptime(d, '%Y-%m-%d') for d in dates_rates]
+                        closes = np.array(closes)
+                        # از Close برای Open/High/Low استفاده می‌کنیم (تقریبی)
+                        opens = closes.copy()
+                        highs = closes.copy()
+                        lows = closes.copy()
+                        volumes = np.zeros(len(closes))
+                        data = {
+                            'dates': dates,
+                            'open': opens,
+                            'high': highs,
+                            'low': lows,
+                            'close': closes,
+                            'volume': volumes
+                        }
+                        forex_cache[cache_key] = (data, datetime.now())
+                        logger.info(f"Forex data fallback from Frankfurter for {symbol}")
+                        return data
+        except Exception as e2:
+            logger.error(f"Frankfurter fallback failed: {e2}")
+
+    # اگر هیچ داده‌ای به دست نیامد
+    return None
 
 # ========== توابع تحلیل تکنیکال فوق‌پیشرفته ==========
 def calculate_indicators(data):
@@ -1149,7 +1210,7 @@ def fetch_cryptopanic(symbol, limit=8):
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
         params = {
-            'auth_token': '',
+            'auth_token': CRYPTOPANIC_API_KEY,  # استفاده از کلید API در صورت وجود
             'currencies': symbol.lower(),
             'kind': 'news',
             'public': 'true',
