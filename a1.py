@@ -407,41 +407,41 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== دریافت قیمت فارکس از منابع معتبر ==========
+# ========== دریافت قیمت فارکس از منابع معتبر (اولویت با یاهو فایننس) ==========
 def get_forex_price(symbol="EURUSD"):
     """
-    دریافت قیمت لحظه‌ای فارکس از منابع معتبر:
-    1. OANDA (در صورت وجود API Key)
-    2. exchangerate-api.com (رایگان)
-    3. یاهو فایننس (fallback)
+    دریافت قیمت لحظه‌ای فارکس از منابع معتبر به ترتیب:
+    1. Yahoo Finance (بدون نیاز به کلید، دقیق)
+    2. exchangerate-api.com (رایگان، بدون کلید)
+    3. OANDA (در صورت وجود API Key)
     """
     cache_key = f"forex_price_{symbol}"
     cached = fetcher._get_cached(cache_key)
     if cached:
         return cached
 
-    # تلاش با OANDA
-    if OANDA_API_KEY:
-        try:
-            # تبدیل نماد به فرمت OANDA (مثلاً EUR_USD)
-            if symbol == "XAUUSD":
-                oanda_symbol = "XAU_USD"
-            else:
-                oanda_symbol = symbol[:3] + "_" + symbol[3:6] if len(symbol) >= 6 else symbol
-            url = f"https://api-fxtrade.oanda.com/v1/prices?instruments={oanda_symbol}"
-            headers = {'Authorization': f'Bearer {OANDA_API_KEY}'}
-            resp = requests.get(url, headers=headers, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get('prices'):
-                    price = float(data['prices'][0]['bid'])
-                    result = {'price': price, 'change': 0, 'source': 'OANDA'}
-                    fetcher._set_cache(cache_key, result)
-                    return result
-        except Exception as e:
-            logger.warning(f"OANDA failed for {symbol}: {e}")
+    # 1. تلاش با Yahoo Finance (اولویت اول)
+    try:
+        # تنظیم session با User-Agent مناسب برای جلوگیری از محدودیت
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        ticker = yf.Ticker(f"{symbol}=X")
+        ticker._session = session
+        hist = ticker.history(period="1d", interval="1m")
+        if not hist.empty:
+            price = hist['Close'].iloc[-1]
+            first_price = hist['Close'].iloc[0] if len(hist) > 0 else price
+            change = ((price - first_price) / first_price) * 100 if first_price != 0 else 0
+            result = {'price': price, 'change': change, 'source': 'Yahoo Finance'}
+            fetcher._set_cache(cache_key, result)
+            logger.info(f"Forex price from Yahoo: {symbol} = {price}")
+            return result
+    except Exception as e:
+        logger.warning(f"Yahoo Finance failed for {symbol}: {e}")
 
-    # تلاش با exchangerate-api.com (رایگان)
+    # 2. تلاش با exchangerate-api.com (رایگان)
     try:
         if symbol == "XAUUSD":
             from_currency = "XAU"
@@ -458,22 +458,31 @@ def get_forex_price(symbol="EURUSD"):
                 change = 0  # این API تغییرات ۲۴ ساعته نمی‌دهد
                 result = {'price': price, 'change': change, 'source': 'exchangerate-api.com'}
                 fetcher._set_cache(cache_key, result)
+                logger.info(f"Forex price from exchangerate-api: {symbol} = {price}")
                 return result
     except Exception as e:
         logger.warning(f"exchangerate-api failed for {symbol}: {e}")
 
-    # Fallback: یاهو فایننس
-    try:
-        ticker = yf.Ticker(f"{symbol}=X")
-        hist = ticker.history(period="1d", interval="1m")
-        if not hist.empty:
-            price = hist['Close'].iloc[-1]
-            change = ((price - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100 if len(hist) > 1 else 0
-            result = {'price': price, 'change': change, 'source': 'Yahoo Finance'}
-            fetcher._set_cache(cache_key, result)
-            return result
-    except Exception as e:
-        logger.warning(f"Yahoo Finance fallback failed for {symbol}: {e}")
+    # 3. تلاش با OANDA (اگر کلید موجود باشد)
+    if OANDA_API_KEY:
+        try:
+            if symbol == "XAUUSD":
+                oanda_symbol = "XAU_USD"
+            else:
+                oanda_symbol = symbol[:3] + "_" + symbol[3:6] if len(symbol) >= 6 else symbol
+            url = f"https://api-fxtrade.oanda.com/v1/prices?instruments={oanda_symbol}"
+            headers = {'Authorization': f'Bearer {OANDA_API_KEY}'}
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('prices'):
+                    price = float(data['prices'][0]['bid'])
+                    result = {'price': price, 'change': 0, 'source': 'OANDA'}
+                    fetcher._set_cache(cache_key, result)
+                    logger.info(f"Forex price from OANDA: {symbol} = {price}")
+                    return result
+        except Exception as e:
+            logger.warning(f"OANDA failed for {symbol}: {e}")
 
     return None
 
