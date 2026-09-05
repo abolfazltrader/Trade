@@ -43,6 +43,9 @@ RATE_LIMIT_PERIOD = 60
 # API Key اختیاری برای CryptoPanic (برای رفع خطای 403)
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
 
+# API Key اختیاری برای OANDA (برای دریافت قیمت فارکس)
+OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
+
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
@@ -403,6 +406,76 @@ def get_crypto_price_by_symbol(symbol):
         return fetcher.get_crypto_price(symbol)
     except Exception:
         return None
+
+# ========== دریافت قیمت فارکس از منابع معتبر ==========
+def get_forex_price(symbol="EURUSD"):
+    """
+    دریافت قیمت لحظه‌ای فارکس از منابع معتبر:
+    1. OANDA (در صورت وجود API Key)
+    2. exchangerate-api.com (رایگان)
+    3. یاهو فایننس (fallback)
+    """
+    cache_key = f"forex_price_{symbol}"
+    cached = fetcher._get_cached(cache_key)
+    if cached:
+        return cached
+
+    # تلاش با OANDA
+    if OANDA_API_KEY:
+        try:
+            # تبدیل نماد به فرمت OANDA (مثلاً EUR_USD)
+            if symbol == "XAUUSD":
+                oanda_symbol = "XAU_USD"
+            else:
+                oanda_symbol = symbol[:3] + "_" + symbol[3:6] if len(symbol) >= 6 else symbol
+            url = f"https://api-fxtrade.oanda.com/v1/prices?instruments={oanda_symbol}"
+            headers = {'Authorization': f'Bearer {OANDA_API_KEY}'}
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('prices'):
+                    price = float(data['prices'][0]['bid'])
+                    result = {'price': price, 'change': 0, 'source': 'OANDA'}
+                    fetcher._set_cache(cache_key, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"OANDA failed for {symbol}: {e}")
+
+    # تلاش با exchangerate-api.com (رایگان)
+    try:
+        if symbol == "XAUUSD":
+            from_currency = "XAU"
+            to_currency = "USD"
+        else:
+            from_currency = symbol[:3]
+            to_currency = symbol[3:6] if len(symbol) >= 6 else "USD"
+        url = f"https://api.exchangerate-api.com/v4/latest/{from_currency}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('rates') and to_currency in data['rates']:
+                price = data['rates'][to_currency]
+                change = 0  # این API تغییرات ۲۴ ساعته نمی‌دهد
+                result = {'price': price, 'change': change, 'source': 'exchangerate-api.com'}
+                fetcher._set_cache(cache_key, result)
+                return result
+    except Exception as e:
+        logger.warning(f"exchangerate-api failed for {symbol}: {e}")
+
+    # Fallback: یاهو فایننس
+    try:
+        ticker = yf.Ticker(f"{symbol}=X")
+        hist = ticker.history(period="1d", interval="1m")
+        if not hist.empty:
+            price = hist['Close'].iloc[-1]
+            change = ((price - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100 if len(hist) > 1 else 0
+            result = {'price': price, 'change': change, 'source': 'Yahoo Finance'}
+            fetcher._set_cache(cache_key, result)
+            return result
+    except Exception as e:
+        logger.warning(f"Yahoo Finance fallback failed for {symbol}: {e}")
+
+    return None
 
 # ---------- ترجمه ----------
 translation_cache = {}
@@ -1210,7 +1283,7 @@ def fetch_cryptopanic(symbol, limit=8):
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
         params = {
-            'auth_token': CRYPTOPANIC_API_KEY,  # استفاده از کلید API در صورت وجود
+            'auth_token': CRYPTOPANIC_API_KEY,
             'currencies': symbol.lower(),
             'kind': 'news',
             'public': 'true',
@@ -1839,32 +1912,24 @@ def callback_price(call):
             reply = "❌ دامیننس USDT در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_eurusd":
-        info = get_crypto_price("EUR/USDT")
+        info = get_forex_price("EURUSD")
         if info:
-            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
-            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت EUR/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_gbpusd":
-        info = get_crypto_price("GBP/USDT")
+        info = get_forex_price("GBPUSD")
         if info:
-            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                reply += f"📈 بالا: {info['high']:,.4f}\n📉 پایین: {info['low']:,.4f}\n"
-            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت GBP/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_gold":
-        info = get_gold_price()
+        # برای طلا از تابع فارکس استفاده می‌کنیم
+        info = get_forex_price("XAUUSD")
         if info:
-            reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
-            if info.get('high') and info.get('low'):
-                reply += f"📈 بالا: {info['high']:,.2f}\n📉 پایین: {info['low']:,.2f}\n"
-            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت XAU/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
