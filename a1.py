@@ -19,8 +19,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 import pandas as pd
-from ta.trend import EMAIndicator, MACD, ADXIndicator, IchimokuIndicator, PSARIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator, CCIIndicator
+# اصلاح import: CCIIndicator از ta.trend است، نه ta.momentum
+from ta.trend import EMAIndicator, MACD, ADXIndicator, IchimokuIndicator, PSARIndicator, CCIIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
 import yfinance as yf
@@ -757,6 +758,7 @@ def calculate_indicators(data):
         df['senkou_a'] = np.nan
         df['senkou_b'] = np.nan
     
+    # CCIIndicator اکنون از ta.trend وارد شده است
     df['CCI'] = CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
     df['OBV'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume()
     psar = PSARIndicator(high=df['high'], low=df['low'], close=df['close'], step=0.02, max_step=0.2)
