@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 import pandas as pd
-# اصلاح import: CCIIndicator از ta.trend است، نه ta.momentum
 from ta.trend import EMAIndicator, MACD, ADXIndicator, IchimokuIndicator, PSARIndicator, CCIIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -41,10 +40,7 @@ ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdig
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", 20))
 RATE_LIMIT_PERIOD = 60
 
-# API Key اختیاری برای CryptoPanic (برای رفع خطای 403)
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
-
-# API Key اختیاری برای OANDA (برای دریافت قیمت فارکس)
 OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
 
 bot = telebot.TeleBot(TOKEN)
@@ -408,22 +404,14 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
-# ========== دریافت قیمت فارکس از منابع معتبر (اولویت با یاهو فایننس) ==========
+# ========== دریافت قیمت فارکس ==========
 def get_forex_price(symbol="EURUSD"):
-    """
-    دریافت قیمت لحظه‌ای فارکس از منابع معتبر به ترتیب:
-    1. Yahoo Finance (بدون نیاز به کلید، دقیق)
-    2. exchangerate-api.com (رایگان، بدون کلید)
-    3. OANDA (در صورت وجود API Key)
-    """
     cache_key = f"forex_price_{symbol}"
     cached = fetcher._get_cached(cache_key)
     if cached:
         return cached
 
-    # 1. تلاش با Yahoo Finance (اولویت اول)
     try:
-        # تنظیم session با User-Agent مناسب برای جلوگیری از محدودیت
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -442,7 +430,6 @@ def get_forex_price(symbol="EURUSD"):
     except Exception as e:
         logger.warning(f"Yahoo Finance failed for {symbol}: {e}")
 
-    # 2. تلاش با exchangerate-api.com (رایگان)
     try:
         if symbol == "XAUUSD":
             from_currency = "XAU"
@@ -456,7 +443,7 @@ def get_forex_price(symbol="EURUSD"):
             data = resp.json()
             if data.get('rates') and to_currency in data['rates']:
                 price = data['rates'][to_currency]
-                change = 0  # این API تغییرات ۲۴ ساعته نمی‌دهد
+                change = 0
                 result = {'price': price, 'change': change, 'source': 'exchangerate-api.com'}
                 fetcher._set_cache(cache_key, result)
                 logger.info(f"Forex price from exchangerate-api: {symbol} = {price}")
@@ -464,7 +451,6 @@ def get_forex_price(symbol="EURUSD"):
     except Exception as e:
         logger.warning(f"exchangerate-api failed for {symbol}: {e}")
 
-    # 3. تلاش با OANDA (اگر کلید موجود باشد)
     if OANDA_API_KEY:
         try:
             if symbol == "XAUUSD":
@@ -565,15 +551,15 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         base_interval = '1m'
         multiplier = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60}.get(timeframe, 1)
         needed_points = min(limit * multiplier, 5000)
-        period = 'max'
+        period = '6mo'  # استفاده از ۶ ماه اخیر برای داده‌های دقیق‌تر
     elif timeframe == '4h':
         base_interval = '1h'
         needed_points = limit * 4
-        period = 'max'
+        period = '6mo'
     else:  # '1d'
         base_interval = '1d'
         needed_points = limit
-        period = 'max'
+        period = '1y'   # یک سال برای داده‌های روزانه
 
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
     if cache_key in forex_cache:
@@ -581,15 +567,12 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         if (datetime.now() - timestamp).seconds < 600:
             return data
 
-    # تلاش با Yahoo Finance
-    try:
-        # تنظیم session با User-Agent مناسب
+    # تابع کمکی برای دریافت داده از یاهو
+    def fetch_yahoo(interval, period):
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
-        
-        # لیست فرمت‌های مختلف ticker
         ticker_formats = [
             f"{symbol}=X",
             symbol,
@@ -597,123 +580,99 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
             f"EURUSD=X" if symbol == "EURUSD" else None
         ]
         ticker_formats = [t for t in ticker_formats if t is not None]
-        
         df = None
         for tfmt in ticker_formats:
             try:
                 ticker = yf.Ticker(tfmt)
                 ticker._session = session
-                df = ticker.history(period=period, interval=base_interval)
+                df = ticker.history(period=period, interval=interval)
                 if not df.empty:
-                    logger.info(f"Yahoo data fetched for {symbol} using ticker {tfmt}")
+                    logger.info(f"Yahoo data fetched for {symbol} with interval={interval}, period={period} using ticker {tfmt}")
                     break
             except:
                 continue
-        
-        # اگر هیچ داده‌ای نیامد، با period کوتاه‌تر امتحان کن
+        # اگر با period مشخص شده داده‌ای نیامد، با period کوتاه‌تر امتحان کن
         if df is None or df.empty:
             for tfmt in ticker_formats:
                 try:
                     ticker = yf.Ticker(tfmt)
                     ticker._session = session
-                    df = ticker.history(period="6mo", interval=base_interval)
+                    df = ticker.history(period="3mo", interval=interval)
                     if not df.empty:
-                        logger.info(f"Yahoo data fetched (6mo) for {symbol} using ticker {tfmt}")
+                        logger.info(f"Yahoo data fetched (3mo) for {symbol} with interval={interval} using ticker {tfmt}")
                         break
                 except:
                     continue
-        
-        if df is not None and not df.empty:
-            # Resample در صورت نیاز
-            if timeframe != base_interval:
-                resample_rule = {
-                    '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
-                    '1h': '1H', '4h': '4H'
-                }.get(timeframe)
-                if resample_rule:
-                    df = df.resample(resample_rule).agg({
-                        'Open': 'first',
-                        'High': 'max',
-                        'Low': 'min',
-                        'Close': 'last',
-                        'Volume': 'sum'
-                    }).dropna()
+        return df
 
-            df = df.tail(needed_points)
-            if len(df) >= 30:
-                dates = df.index.to_pydatetime()
-                opens = df['Open'].values
-                highs = df['High'].values
-                lows = df['Low'].values
-                closes = df['Close'].values
-                volumes = df['Volume'].values
-                data = {
-                    'dates': dates,
-                    'open': np.array(opens),
-                    'high': np.array(highs),
-                    'low': np.array(lows),
-                    'close': np.array(closes),
-                    'volume': np.array(volumes)
-                }
-                forex_cache[cache_key] = (data, datetime.now())
-                logger.info(f"Forex data fetched for {symbol} ({timeframe}) - {len(dates)} candles")
-                return data
-    except Exception as e:
-        logger.warning(f"Yahoo Finance failed for {symbol}: {e}")
+    # مرحله ۱: تلاش با interval اصلی
+    df = fetch_yahoo(base_interval, period)
 
-    # Fallback: استفاده از Frankfurter API برای داده‌های روزانه (فقط Close)
-    if timeframe == '1d':
-        try:
-            # استخراج ارز مبدأ و مقصد از نماد (مثلاً EURUSD -> EUR, USD)
-            if len(symbol) == 6:
-                from_currency = symbol[:3]
-                to_currency = symbol[3:6]
-            else:
-                # برای نمادهای با طول متفاوت (مثلاً USDJPY -> USD, JPY)
-                from_currency = symbol[:3]
-                to_currency = symbol[3:] if len(symbol) > 3 else "USD"
-            
-            # دریافت داده‌های ۳۰ روز اخیر
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=limit*2)).strftime('%Y-%m-%d')
-            url = f"https://api.frankfurter.app/{start_date}..{end_date}?from={from_currency}&to={to_currency}"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and 'rates' in data:
-                    rates = data['rates']
-                    dates_rates = sorted(rates.keys())
-                    closes = []
-                    for dt in dates_rates:
-                        val = rates[dt].get(to_currency)
-                        if val is not None:
-                            closes.append(float(val))
-                    if closes:
-                        dates = [datetime.strptime(d, '%Y-%m-%d') for d in dates_rates]
-                        closes = np.array(closes)
-                        # از Close برای Open/High/Low استفاده می‌کنیم (تقریبی)
-                        opens = closes.copy()
-                        highs = closes.copy()
-                        lows = closes.copy()
-                        volumes = np.zeros(len(closes))
-                        data = {
-                            'dates': dates,
-                            'open': opens,
-                            'high': highs,
-                            'low': lows,
-                            'close': closes,
-                            'volume': volumes
-                        }
-                        forex_cache[cache_key] = (data, datetime.now())
-                        logger.info(f"Forex data fallback from Frankfurter for {symbol}")
-                        return data
-        except Exception as e2:
-            logger.error(f"Frankfurter fallback failed: {e2}")
+    # اگر داده‌ها کافی نبود، برای 4h و روزانه یک fallback با interval='1d' انجام بده
+    if (df is None or df.empty or len(df) < 30) and timeframe == '4h':
+        logger.info(f"Not enough 1h data for {symbol} (4h). Trying daily fallback...")
+        df_daily = fetch_yahoo('1d', '1y')
+        if df_daily is not None and not df_daily.empty:
+            # Resample از روزانه به 4 ساعته (با روش تقریبی)
+            df = df_daily.resample('4H').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+            # اگر داده‌های 4 ساعته کمتر از حد انتظار بود، از داده‌های اصلی روزانه استفاده کن
+            if len(df) < 30:
+                df = df_daily
 
-    # اگر هیچ داده‌ای به دست نیامد
-    return None
+    if df is None or df.empty:
+        logger.warning(f"No forex data for {symbol}")
+        return None
 
-# ========== توابع تحلیل تکنیکال فوق‌پیشرفته ==========
+    # Resample در صورت نیاز (اگر timeframe != base_interval و هنوز resample نشده باشد)
+    if timeframe != base_interval and timeframe != '4h':
+        resample_rule = {
+            '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
+            '1h': '1H'
+        }.get(timeframe)
+        if resample_rule:
+            df = df.resample(resample_rule).agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+
+    # اگر timeframe == '4h' و داده‌ها هنوز به صورت روزانه هستند (و resample قبلاً انجام نشده)، دوباره resample نکنیم
+    # در غیر این صورت ممکن است داده‌ها خراب شوند
+
+    df = df.tail(needed_points if needed_points < len(df) else len(df))
+    
+    if len(df) < 30:
+        logger.warning(f"Not enough forex data for {symbol}: got {len(df)} candles")
+        return None
+
+    dates = df.index.to_pydatetime()
+    opens = df['Open'].values
+    highs = df['High'].values
+    lows = df['Low'].values
+    closes = df['Close'].values
+    volumes = df['Volume'].values if 'Volume' in df.columns else np.zeros(len(df))
+
+    data = {
+        'dates': dates,
+        'open': np.array(opens),
+        'high': np.array(highs),
+        'low': np.array(lows),
+        'close': np.array(closes),
+        'volume': np.array(volumes)
+    }
+    forex_cache[cache_key] = (data, datetime.now())
+    logger.info(f"Forex data fetched for {symbol} ({timeframe}) - {len(dates)} candles")
+    return data
+
+# ========== توابع تحلیل تکنیکال ==========
 def calculate_indicators(data):
     df = pd.DataFrame({
         'high': data['high'],
@@ -722,7 +681,6 @@ def calculate_indicators(data):
         'volume': data['volume']
     })
     
-    # اندیکاتورهای پایه
     df['EMA_100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
     df['EMA_200'] = EMAIndicator(close=df['close'], window=200).ema_indicator()
     df['RSI'] = RSIIndicator(close=df['close'], window=14).rsi()
@@ -744,7 +702,6 @@ def calculate_indicators(data):
     df['MFI'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
     df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
     
-    # اندیکاتورهای پیشرفته جدید
     try:
         ichimoku = IchimokuIndicator(high=df['high'], low=df['low'], window1=9, window2=26, window3=52)
         df['tenkan'] = ichimoku.ichimoku_conversion_line()
@@ -758,7 +715,6 @@ def calculate_indicators(data):
         df['senkou_a'] = np.nan
         df['senkou_b'] = np.nan
     
-    # CCIIndicator اکنون از ta.trend وارد شده است
     df['CCI'] = CCIIndicator(high=df['high'], low=df['low'], close=df['close'], window=20).cci()
     df['OBV'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume()
     psar = PSARIndicator(high=df['high'], low=df['low'], close=df['close'], step=0.02, max_step=0.2)
@@ -776,7 +732,6 @@ def generate_trading_signal(data, indicators):
     buy_conditions = 0
     sell_conditions = 0
     
-    # شرایط خرید (۸ مورد قبلی)
     if last['close'] > last['EMA_200']:
         buy_conditions += 1
     if last['close'] > last['EMA_100']:
@@ -794,7 +749,6 @@ def generate_trading_signal(data, indicators):
     if last['MFI'] > 50:
         buy_conditions += 1
     
-    # شرایط فروش (۸ مورد قبلی)
     if last['close'] < last['EMA_200']:
         sell_conditions += 1
     if last['close'] < last['EMA_100']:
@@ -812,28 +766,23 @@ def generate_trading_signal(data, indicators):
     if last['MFI'] < 50:
         sell_conditions += 1
     
-    # شرایط جدید با اندیکاتورهای پیشرفته
-    # Ichimoku: اگر قیمت بالای ابر باشد -> صعودی
     if not np.isnan(last['senkou_a']) and not np.isnan(last['senkou_b']):
         if last['close'] > max(last['senkou_a'], last['senkou_b']):
             buy_conditions += 1
         elif last['close'] < min(last['senkou_a'], last['senkou_b']):
             sell_conditions += 1
     
-    # CCI: زیر 100- oversold, بالای 100+ overbought
     if last['CCI'] < -100:
         buy_conditions += 1
     elif last['CCI'] > 100:
         sell_conditions += 1
     
-    # OBV: روند صعودی حجم
     if len(indicators['OBV']) > 1:
         if indicators['OBV'].iloc[-1] > indicators['OBV'].iloc[-2]:
             buy_conditions += 1
         else:
             sell_conditions += 1
     
-    # PSAR: اگر قیمت بالای PSAR باشد -> صعودی
     if last['close'] > last['PSAR']:
         buy_conditions += 1
     else:
@@ -912,7 +861,6 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Middle')
         ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Lower')
         
-        # رسم Ichimoku Cloud
         if 'senkou_a' in indicators.columns and not indicators['senkou_a'].isna().all():
             ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
                              where=(indicators['senkou_a'] >= indicators['senkou_b']), 
@@ -979,11 +927,13 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
         else:
-            # تنظیم limit برای فارکس (افزایش یافته)
+            # تنظیم limit برای فارکس (کاهش داده برای 4h)
             if timeframe in ['1m', '5m', '15m']:
                 limit = 300
             elif timeframe in ['30m', '1h']:
                 limit = 250
+            elif timeframe == '4h':
+                limit = 150  # کاهش از 200 به 150 برای افزایش احتمال دریافت داده‌های کافی
             else:
                 limit = 200
                 
@@ -1013,7 +963,6 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
         signal_map = {'long': 'لانگ', 'short': 'شورت', 'neutral': 'خنثی'}
         signal_persian = signal_map.get(signal_type, 'نامشخص')
         
-        # محاسبه سطوح فیبوناچی
         high_swing = np.max(data['high'][-50:])
         low_swing = np.min(data['low'][-50:])
         diff = high_swing - low_swing
@@ -1937,7 +1886,6 @@ def callback_price(call):
             reply = "❌ قیمت GBP/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_gold":
-        # برای طلا از تابع فارکس استفاده می‌کنیم
         info = get_forex_price("XAUUSD")
         if info:
             reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
@@ -2155,13 +2103,8 @@ def set_webhook():
     else:
         logger.error("Webhook setting failed")
 
-# اجرای Webhook در زمان راه‌اندازی (قبل از شروع Gunicorn)
 set_webhook()
 
-# ---------- نقطه‌ی ورود برای Gunicorn ----------
-# متغیر 'app' از قبل تعریف شده است. Gunicorn به آن دسترسی دارد.
-
-# اگر به‌صورت مستقیم اجرا شود (برای تست محلی):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
