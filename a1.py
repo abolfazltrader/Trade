@@ -24,6 +24,7 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
 import yfinance as yf
+import mplfinance as mpf  # <-- کتابخانه جدید برای چارت حرفه‌ای
 
 # ---------- تنظیمات امنیتی و محیطی ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -825,10 +826,89 @@ def calculate_rrr(data, signal):
         return 0
     return round(reward / risk, 2)
 
-# ========== تابع رسم چارت با کیفیت بالا ==========
+# ========== تابع رسم چارت با mplfinance (شبیه تریدینگ‌ویو) ==========
 def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type='crypto'):
     try:
-        # افزایش اندازه و کیفیت
+        # ساخت DataFrame با فرمت مورد نیاز mplfinance
+        df = pd.DataFrame({
+            'Date': data['dates'],
+            'Open': data['open'],
+            'High': data['high'],
+            'Low': data['low'],
+            'Close': data['close'],
+            'Volume': data['volume']
+        })
+        df.set_index('Date', inplace=True)
+        
+        # اضافه کردن اندیکاتورها به DataFrame برای نمایش
+        df['EMA_100'] = indicators['EMA_100']
+        df['EMA_200'] = indicators['EMA_200']
+        df['BB_upper'] = indicators['BB_upper']
+        df['BB_middle'] = indicators['BB_middle']
+        df['BB_lower'] = indicators['BB_lower']
+        
+        # ساخت addplot برای اندیکاتورها
+        add_plots = [
+            mpf.make_addplot(df['EMA_100'], color='#f39c12', width=1.5, linestyle='--'),
+            mpf.make_addplot(df['EMA_200'], color='#9b59b6', width=1.5, linestyle='--'),
+            mpf.make_addplot(df['BB_upper'], color='#3498db', width=1, linestyle=':'),
+            mpf.make_addplot(df['BB_middle'], color='#3498db', width=1, linestyle=':'),
+            mpf.make_addplot(df['BB_lower'], color='#3498db', width=1, linestyle=':')
+        ]
+        
+        # اضافه کردن سطوح حمایت و مقاومت
+        support_line = [support] * len(df)
+        resistance_line = [resistance] * len(df)
+        add_plots.append(mpf.make_addplot(support_line, color='#2ecc71', width=1.5, linestyle='--'))
+        add_plots.append(mpf.make_addplot(resistance_line, color='#e74c3c', width=1.5, linestyle='--'))
+        
+        # تنظیمات ظاهری (سبک شبیه تریدینگ‌ویو)
+        style_kwargs = {
+            'style': 'charles',           # سبک کلاسیک
+            'figsize': (16, 9),
+            'figscale': 1.2,
+            'gridstyle': ':',             # خطوط نقطه‌چین
+            'gridcolor': '#2c3e50',
+            'gridalpha': 0.3,
+            'facecolor': '#1a1a2e',       # زمینه تیره
+            'edgecolor': 'black',
+            'volume': True,               # نمایش حجم
+            'volume_panel': 1,
+            'panel_ratios': (3, 1),
+            'xrotation': 0,
+            'datetime_format': '%d %b %H:%M',
+            'tight_layout': True
+        }
+        
+        # عنوان و برچسب محورها
+        title = f'{symbol} - {TIMEFRAME_NAMES.get(timeframe, timeframe)} Chart ({asset_type})'
+        ylabel = 'Price (USD)' if asset_type == 'forex' else 'Price (USDT)'
+        
+        # رسم چارت با mplfinance
+        fig, axes = mpf.plot(
+            df,
+            type='candle',
+            addplot=add_plots,
+            title=title,
+            ylabel=ylabel,
+            **style_kwargs
+        )
+        
+        # ذخیره تصویر در حافظه
+        img_data = BytesIO()
+        fig.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
+        img_data.seek(0)
+        plt.close(fig)
+        return img_data
+        
+    except Exception as e:
+        logger.error(f"Error plotting chart with mplfinance: {e}")
+        # در صورت خطا، از روش قبلی (matplotlib) استفاده کنیم
+        return plot_chart_fallback(data, indicators, symbol, support, resistance, timeframe, asset_type)
+
+# ========== تابع fallback (در صورت خطای mplfinance) ==========
+def plot_chart_fallback(data, indicators, symbol, support, resistance, timeframe, asset_type='crypto'):
+    try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 9), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
         
@@ -840,7 +920,6 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         
         for i in range(len(dates)):
             color = '#2ecc71' if closes[i] >= opens[i] else '#e74c3c'
-            # افزایش عرض کندل
             ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]), 
                    color=color, width=0.8, alpha=0.9)
             ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]], 
@@ -848,14 +927,12 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
             ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
                     color=color, linewidth=1.2)
         
-        # خطوط اندیکاتور با ضخامت بیشتر
         ax1.plot(dates, indicators['EMA_100'], color='#f39c12', linewidth=2, linestyle='--', label='EMA 100')
         ax1.plot(dates, indicators['EMA_200'], color='#9b59b6', linewidth=2, linestyle='--', label='EMA 200')
         ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Upper')
         ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Middle')
         ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Lower')
         
-        # Ichimoku Cloud با شفافیت کمتر
         if 'senkou_a' in indicators.columns and not indicators['senkou_a'].isna().all():
             ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
                              where=(indicators['senkou_a'] >= indicators['senkou_b']), 
@@ -866,7 +943,6 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
             ax1.plot(dates, indicators['tenkan'], color='orange', linewidth=1.5, alpha=0.6, label='Tenkan')
             ax1.plot(dates, indicators['kijun'], color='magenta', linewidth=1.5, alpha=0.6, label='Kijun')
         
-        # خطوط حمایت و مقاومت با ضخامت بیشتر
         ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=2, alpha=0.9, label=f'Support: {support:.2f}')
         ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=2, alpha=0.9, label=f'Resistance: {resistance:.2f}')
         
@@ -885,7 +961,6 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         ax1.tick_params(colors='white', labelsize=10)
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
         
-        # حجم با ضخامت بیشتر
         ax2.bar(dates, data['volume'], color='#3498db', alpha=0.8, width=0.8)
         ax2.set_facecolor('#1a1a2e')
         ax2.grid(True, alpha=0.3, linestyle='dotted')
@@ -896,14 +971,13 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         plt.xticks(rotation=0)
         plt.tight_layout(pad=1.5)
         
-        # ذخیره با کیفیت بالا
         img_data = BytesIO()
         plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
         plt.close()
         return img_data
     except Exception as e:
-        logger.error(f"Error plotting chart: {e}")
+        logger.error(f"Error in fallback plot: {e}")
         return None
 
 def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
