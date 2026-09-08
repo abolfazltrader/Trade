@@ -551,15 +551,15 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         base_interval = '1m'
         multiplier = {'1m':1, '5m':5, '15m':15, '30m':30, '1h':60}.get(timeframe, 1)
         needed_points = min(limit * multiplier, 5000)
-        period = '6mo'  # استفاده از ۶ ماه اخیر برای داده‌های دقیق‌تر
+        period = '6mo'
     elif timeframe == '4h':
         base_interval = '1h'
         needed_points = limit * 4
         period = '6mo'
-    else:  # '1d'
+    else:
         base_interval = '1d'
         needed_points = limit
-        period = '1y'   # یک سال برای داده‌های روزانه
+        period = '1y'
 
     cache_key = f"forex_{symbol}_{timeframe}_{limit}"
     if cache_key in forex_cache:
@@ -567,7 +567,6 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         if (datetime.now() - timestamp).seconds < 600:
             return data
 
-    # تابع کمکی برای دریافت داده از یاهو
     def fetch_yahoo(interval, period):
         session = requests.Session()
         session.headers.update({
@@ -591,7 +590,6 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
                     break
             except:
                 continue
-        # اگر با period مشخص شده داده‌ای نیامد، با period کوتاه‌تر امتحان کن
         if df is None or df.empty:
             for tfmt in ticker_formats:
                 try:
@@ -605,15 +603,12 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
                     continue
         return df
 
-    # مرحله ۱: تلاش با interval اصلی
     df = fetch_yahoo(base_interval, period)
 
-    # اگر داده‌ها کافی نبود، برای 4h و روزانه یک fallback با interval='1d' انجام بده
     if (df is None or df.empty or len(df) < 30) and timeframe == '4h':
         logger.info(f"Not enough 1h data for {symbol} (4h). Trying daily fallback...")
         df_daily = fetch_yahoo('1d', '1y')
         if df_daily is not None and not df_daily.empty:
-            # Resample از روزانه به 4 ساعته (با روش تقریبی)
             df = df_daily.resample('4H').agg({
                 'Open': 'first',
                 'High': 'max',
@@ -621,7 +616,6 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
                 'Close': 'last',
                 'Volume': 'sum'
             }).dropna()
-            # اگر داده‌های 4 ساعته کمتر از حد انتظار بود، از داده‌های اصلی روزانه استفاده کن
             if len(df) < 30:
                 df = df_daily
 
@@ -629,7 +623,6 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
         logger.warning(f"No forex data for {symbol}")
         return None
 
-    # Resample در صورت نیاز (اگر timeframe != base_interval و هنوز resample نشده باشد)
     if timeframe != base_interval and timeframe != '4h':
         resample_rule = {
             '1m': '1T', '5m': '5T', '15m': '15T', '30m': '30T',
@@ -643,9 +636,6 @@ def get_forex_historical_data(symbol="EURUSD", timeframe='1d', limit=200):
                 'Close': 'last',
                 'Volume': 'sum'
             }).dropna()
-
-    # اگر timeframe == '4h' و داده‌ها هنوز به صورت روزانه هستند (و resample قبلاً انجام نشده)، دوباره resample نکنیم
-    # در غیر این صورت ممکن است داده‌ها خراب شوند
 
     df = df.tail(needed_points if needed_points < len(df) else len(df))
     
@@ -835,9 +825,11 @@ def calculate_rrr(data, signal):
         return 0
     return round(reward / risk, 2)
 
+# ========== تابع رسم چارت با کیفیت بالا ==========
 def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type='crypto'):
     try:
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [3, 1]})
+        # افزایش اندازه و کیفیت
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 9), gridspec_kw={'height_ratios': [3, 1]})
         fig.patch.set_facecolor('#1a1a2e')
         
         dates = data['dates']
@@ -848,59 +840,65 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         
         for i in range(len(dates)):
             color = '#2ecc71' if closes[i] >= opens[i] else '#e74c3c'
+            # افزایش عرض کندل
             ax1.bar(dates[i], closes[i]-opens[i], bottom=min(opens[i], closes[i]), 
-                   color=color, width=0.6, alpha=0.8)
+                   color=color, width=0.8, alpha=0.9)
             ax1.plot([dates[i], dates[i]], [min(opens[i], closes[i]), highs[i]], 
-                    color=color, linewidth=1)
+                    color=color, linewidth=1.2)
             ax1.plot([dates[i], dates[i]], [lows[i], max(opens[i], closes[i])], 
-                    color=color, linewidth=1)
+                    color=color, linewidth=1.2)
         
-        ax1.plot(dates, indicators['EMA_100'], color='#f39c12', linewidth=1.5, linestyle='--', label='EMA 100')
-        ax1.plot(dates, indicators['EMA_200'], color='#9b59b6', linewidth=1.5, linestyle='--', label='EMA 200')
-        ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Upper')
-        ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Middle')
-        ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1, alpha=0.5, linestyle=':', label='BB Lower')
+        # خطوط اندیکاتور با ضخامت بیشتر
+        ax1.plot(dates, indicators['EMA_100'], color='#f39c12', linewidth=2, linestyle='--', label='EMA 100')
+        ax1.plot(dates, indicators['EMA_200'], color='#9b59b6', linewidth=2, linestyle='--', label='EMA 200')
+        ax1.plot(dates, indicators['BB_upper'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Upper')
+        ax1.plot(dates, indicators['BB_middle'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Middle')
+        ax1.plot(dates, indicators['BB_lower'], color='#3498db', linewidth=1.5, alpha=0.6, linestyle=':', label='BB Lower')
         
+        # Ichimoku Cloud با شفافیت کمتر
         if 'senkou_a' in indicators.columns and not indicators['senkou_a'].isna().all():
             ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
                              where=(indicators['senkou_a'] >= indicators['senkou_b']), 
-                             facecolor='green', alpha=0.1, interpolate=True)
+                             facecolor='green', alpha=0.15, interpolate=True)
             ax1.fill_between(dates, indicators['senkou_a'], indicators['senkou_b'], 
                              where=(indicators['senkou_a'] < indicators['senkou_b']), 
-                             facecolor='red', alpha=0.1, interpolate=True)
-            ax1.plot(dates, indicators['tenkan'], color='orange', linewidth=1, alpha=0.5, label='Tenkan')
-            ax1.plot(dates, indicators['kijun'], color='magenta', linewidth=1, alpha=0.5, label='Kijun')
+                             facecolor='red', alpha=0.15, interpolate=True)
+            ax1.plot(dates, indicators['tenkan'], color='orange', linewidth=1.5, alpha=0.6, label='Tenkan')
+            ax1.plot(dates, indicators['kijun'], color='magenta', linewidth=1.5, alpha=0.6, label='Kijun')
         
-        ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Support: {support:.2f}')
-        ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.8, label=f'Resistance: {resistance:.2f}')
+        # خطوط حمایت و مقاومت با ضخامت بیشتر
+        ax1.axhline(y=support, color='#2ecc71', linestyle='--', linewidth=2, alpha=0.9, label=f'Support: {support:.2f}')
+        ax1.axhline(y=resistance, color='#e74c3c', linestyle='--', linewidth=2, alpha=0.9, label=f'Resistance: {resistance:.2f}')
         
         last_price = closes[-1]
         ax1.text(0.02, 0.98, f'Last: {last_price:.2f}', transform=ax1.transAxes,
-                fontsize=12, color='white', verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.7))
+                fontsize=14, color='white', verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='#2c3e50', alpha=0.8))
         
         ax1.set_facecolor('#1a1a2e')
         ax1.grid(True, alpha=0.3, linestyle='dotted')
-        ax1.legend(loc='upper left')
+        ax1.legend(loc='upper left', fontsize=10)
         tf_name = TIMEFRAME_NAMES.get(timeframe, timeframe)
         asset_label = "Forex" if asset_type == 'forex' else "Crypto"
-        ax1.set_title(f'{symbol} - {tf_name} Chart ({asset_label})', color='white', fontsize=14)
-        ax1.set_ylabel('Price (USD)' if asset_type == 'forex' else 'Price (USDT)', color='white')
-        ax1.tick_params(colors='white')
+        ax1.set_title(f'{symbol} - {tf_name} Chart ({asset_label})', color='white', fontsize=16, pad=15)
+        ax1.set_ylabel('Price (USD)' if asset_type == 'forex' else 'Price (USDT)', color='white', fontsize=12)
+        ax1.tick_params(colors='white', labelsize=10)
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
         
-        ax2.bar(dates, data['volume'], color='#3498db', alpha=0.7)
+        # حجم با ضخامت بیشتر
+        ax2.bar(dates, data['volume'], color='#3498db', alpha=0.8, width=0.8)
         ax2.set_facecolor('#1a1a2e')
         ax2.grid(True, alpha=0.3, linestyle='dotted')
-        ax2.set_ylabel('Volume', color='white')
-        ax2.tick_params(colors='white')
+        ax2.set_ylabel('Volume', color='white', fontsize=12)
+        ax2.tick_params(colors='white', labelsize=10)
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d %b %H:%M'))
         
         plt.xticks(rotation=0)
-        plt.tight_layout()
+        plt.tight_layout(pad=1.5)
         
+        # ذخیره با کیفیت بالا
         img_data = BytesIO()
-        plt.savefig(img_data, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a2e')
+        plt.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
         plt.close()
         return img_data
@@ -927,13 +925,12 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             if data is None or data.get('close') is None or len(data['close']) < 30:
                 return None, None, f"❌ داده‌های تاریخی کافی برای این ارز در تایم‌فریم {TIMEFRAME_NAMES.get(timeframe, timeframe)} در دسترس نیست."
         else:
-            # تنظیم limit برای فارکس (کاهش داده برای 4h)
             if timeframe in ['1m', '5m', '15m']:
                 limit = 300
             elif timeframe in ['30m', '1h']:
                 limit = 250
             elif timeframe == '4h':
-                limit = 150  # کاهش از 200 به 150 برای افزایش احتمال دریافت داده‌های کافی
+                limit = 150
             else:
                 limit = 200
                 
@@ -1113,7 +1110,7 @@ def generate_crypto_signal(symbol, analysis_data):
     signal += f"\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} | تحلیلگر بازار"
     return signal
 
-# ========== توابع اخبار ==========
+# ========== توابع اخبار (بدون تغییر) ==========
 def analyze_sentiment_detailed(text):
     positive_words = [
         "surge", "rally", "gain", "positive", "bullish", "rise", "strong", "upbeat", "boost", "growth",
@@ -1238,7 +1235,7 @@ def build_detailed_news_message(symbol, all_news_items, source_names):
     
     return text
 
-# ----- منابع دریافت اخبار -----
+# ----- منابع دریافت اخبار (بدون تغییر) -----
 def fetch_cryptopanic(symbol, limit=8):
     try:
         url = "https://cryptopanic.com/api/v1/posts/"
@@ -1520,9 +1517,9 @@ VALID_FOREX_SYMBOLS = {
 ALL_VALID_SYMBOLS = VALID_CRYPTO_SYMBOLS | VALID_FOREX_SYMBOLS
 
 # ========== متغیرهای حالت ==========
-waiting_for_symbol = {}       # برای اخبار
-waiting_for_signal = {}       # برای دریافت نماد سیگنال
-user_signal_symbol = {}       # ذخیره نماد انتخاب‌شده برای سیگنال
+waiting_for_symbol = {}
+waiting_for_signal = {}
+user_signal_symbol = {}
 
 # ---------- دکمه‌های منو ----------
 def main_menu_keyboard():
@@ -1555,7 +1552,7 @@ def back_to_main_keyboard():
     keyboard.add(InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_main"))
     return keyboard
 
-# ---------- دکوراتور برای اعمال Rate Limit روی هندلرها ----------
+# ---------- دکوراتور Rate Limit ----------
 def rate_limited_handler(func):
     def wrapper(message):
         user_id = message.from_user.id
@@ -1983,7 +1980,6 @@ def handle_text_messages(message):
         bot.reply_to(message, "❌ لطفاً یک متن معتبر وارد کنید.")
         return
 
-    # ===== حالت سیگنال معاملاتی (درخواست نماد) =====
     if waiting_for_signal.get(user_id):
         symbol = text
         if symbol not in ALL_VALID_SYMBOLS:
@@ -2018,7 +2014,6 @@ def handle_text_messages(message):
         )
         return
 
-    # ===== حالت اخبار =====
     if waiting_for_symbol.get(user_id) == "news_symbol":
         waiting_for_symbol.pop(user_id, None)
         if text not in ALL_VALID_SYMBOLS:
