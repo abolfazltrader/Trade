@@ -24,7 +24,7 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
 import yfinance as yf
-import mplfinance as mpf  # <-- کتابخانه جدید برای چارت حرفه‌ای
+import mplfinance as mpf
 
 # ---------- تنظیمات امنیتی و محیطی ----------
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -826,10 +826,9 @@ def calculate_rrr(data, signal):
         return 0
     return round(reward / risk, 2)
 
-# ========== تابع رسم چارت با mplfinance (شبیه تریدینگ‌ویو) ==========
+# ========== تابع رسم چارت (فقط برای تحلیل ارز دلخواه) ==========
 def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type='crypto'):
     try:
-        # ساخت DataFrame با فرمت مورد نیاز mplfinance
         df = pd.DataFrame({
             'Date': data['dates'],
             'Open': data['open'],
@@ -840,14 +839,12 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         })
         df.set_index('Date', inplace=True)
         
-        # اضافه کردن اندیکاتورها به DataFrame برای نمایش
         df['EMA_100'] = indicators['EMA_100']
         df['EMA_200'] = indicators['EMA_200']
         df['BB_upper'] = indicators['BB_upper']
         df['BB_middle'] = indicators['BB_middle']
         df['BB_lower'] = indicators['BB_lower']
         
-        # ساخت addplot برای اندیکاتورها
         add_plots = [
             mpf.make_addplot(df['EMA_100'], color='#f39c12', width=1.5, linestyle='--'),
             mpf.make_addplot(df['EMA_200'], color='#9b59b6', width=1.5, linestyle='--'),
@@ -856,23 +853,21 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
             mpf.make_addplot(df['BB_lower'], color='#3498db', width=1, linestyle=':')
         ]
         
-        # اضافه کردن سطوح حمایت و مقاومت
         support_line = [support] * len(df)
         resistance_line = [resistance] * len(df)
         add_plots.append(mpf.make_addplot(support_line, color='#2ecc71', width=1.5, linestyle='--'))
         add_plots.append(mpf.make_addplot(resistance_line, color='#e74c3c', width=1.5, linestyle='--'))
         
-        # تنظیمات ظاهری (سبک شبیه تریدینگ‌ویو)
         style_kwargs = {
-            'style': 'charles',           # سبک کلاسیک
+            'style': 'charles',
             'figsize': (16, 9),
             'figscale': 1.2,
-            'gridstyle': ':',             # خطوط نقطه‌چین
+            'gridstyle': ':',
             'gridcolor': '#2c3e50',
             'gridalpha': 0.3,
-            'facecolor': '#1a1a2e',       # زمینه تیره
+            'facecolor': '#1a1a2e',
             'edgecolor': 'black',
-            'volume': True,               # نمایش حجم
+            'volume': True,
             'volume_panel': 1,
             'panel_ratios': (3, 1),
             'xrotation': 0,
@@ -880,11 +875,9 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
             'tight_layout': True
         }
         
-        # عنوان و برچسب محورها
         title = f'{symbol} - {TIMEFRAME_NAMES.get(timeframe, timeframe)} Chart ({asset_type})'
         ylabel = 'Price (USD)' if asset_type == 'forex' else 'Price (USDT)'
         
-        # رسم چارت با mplfinance
         fig, axes = mpf.plot(
             df,
             type='candle',
@@ -894,7 +887,6 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
             **style_kwargs
         )
         
-        # ذخیره تصویر در حافظه
         img_data = BytesIO()
         fig.savefig(img_data, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         img_data.seek(0)
@@ -903,8 +895,7 @@ def plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_t
         
     except Exception as e:
         logger.error(f"Error plotting chart with mplfinance: {e}")
-        # در صورت خطا، از روش قبلی (matplotlib) استفاده کنیم
-        return plot_chart_fallback(data, indicators, symbol, support, resistance, timeframe, asset_type)
+        return None
 
 # ========== تابع fallback (در صورت خطای mplfinance) ==========
 def plot_chart_fallback(data, indicators, symbol, support, resistance, timeframe, asset_type='crypto'):
@@ -1071,16 +1062,54 @@ def generate_technical_analysis(symbol, timeframe='1d', asset_type='crypto'):
             'cci': indicators['CCI'].iloc[-1] if not np.isnan(indicators['CCI'].iloc[-1]) else 0
         }
         
+        # چارت فقط در صورت نیاز تولید می‌شود (مثلاً برای تحلیل ارز دلخواه)
         chart_img = None
-        try:
-            chart_img = plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type)
-        except Exception as chart_error:
-            logger.warning(f"Chart plotting failed: {chart_error}")
+        # در اینجا چارت تولید نمی‌کنیم تا در سیگنال ارسال نشود.
+        # برای تحلیل ارز دلخواه، تابع جداگانه‌ای چارت را تولید می‌کند.
         
-        return analysis_data, chart_img, None
+        return analysis_data, None, None  # chart_img = None
     except Exception as e:
         logger.error(f"Error in technical analysis: {e}")
         return None, None, f"❌ خطا در تحلیل تکنیکال: لطفاً مجدداً تلاش کنید."
+
+# تابع تولید چارت برای تحلیل ارز دلخواه (با جدا کردن از سیگنال)
+def generate_chart_for_analysis(symbol, timeframe='4h', asset_type='crypto'):
+    try:
+        if asset_type == 'crypto':
+            if not symbol.endswith('/USDT'):
+                symbol_usdt = f"{symbol}/USDT"
+            else:
+                symbol_usdt = symbol
+            if timeframe in ['1m', '5m']:
+                limit = 80
+            elif timeframe in ['15m', '30m']:
+                limit = 120
+            else:
+                limit = 180
+            data = get_historical_data_multi(symbol_usdt, timeframe, limit)
+        else:
+            if timeframe in ['1m', '5m', '15m']:
+                limit = 300
+            elif timeframe in ['30m', '1h']:
+                limit = 250
+            elif timeframe == '4h':
+                limit = 150
+            else:
+                limit = 200
+            data = get_forex_historical_data(symbol, timeframe, limit)
+        
+        if data is None or data.get('close') is None or len(data['close']) < 30:
+            return None
+        
+        indicators = calculate_indicators(data)
+        support, resistance = find_support_resistance(data)
+        chart_img = plot_chart(data, indicators, symbol, support, resistance, timeframe, asset_type)
+        if chart_img is None:
+            chart_img = plot_chart_fallback(data, indicators, symbol, support, resistance, timeframe, asset_type)
+        return chart_img
+    except Exception as e:
+        logger.error(f"Error generating chart: {e}")
+        return None
 
 def format_analysis_message(data):
     if not data:
@@ -1783,7 +1812,7 @@ def analyze_step(message):
     )
     
     try:
-        analysis_data, chart_img, error = generate_technical_analysis(symbol, '4h', asset_type)
+        analysis_data, _, error = generate_technical_analysis(symbol, '4h', asset_type)
         
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -1801,6 +1830,8 @@ def analyze_step(message):
                 pass
             return
         
+        # تولید چارت برای تحلیل ارز دلخواه
+        chart_img = generate_chart_for_analysis(symbol, '4h', asset_type)
         analysis_msg = format_analysis_message(analysis_data)
         
         if chart_img:
@@ -1896,7 +1927,7 @@ def handle_help(message):
         "ℹ️ **راهنما**\n\n"
         "📊 قیمت لحظه‌ای: دریافت قیمت کریپتو، فارکس و طلا + دامیننس تتر (USDT.D)\n"
         "📰 اخبار: تحلیل اخبار اختصاصی هر ارز با سنتیمنت و نتیجه معاملاتی (از چندین منبع معتبر)\n"
-        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف (کریپتو و فارکس)\n"
+        "📈 سیگنال: دریافت سیگنال‌های خرید و فروش از تحلیل تکنیکال در تایم‌فریم‌های مختلف (کریپتو و فارکس) - **بدون چارت**\n"
         "🔍 تحلیل ارز دلخواه: تحلیل تکنیکال کامل با چارت و اندیکاتورها (تایم‌فریم ۴ ساعته)\n"
         "🎯 پیشنهاد خرید: ارزهای مناسب برای سرمایه‌گذاری\n"
         "👤 پنل کاربری: مشاهده وضعیت حساب\n\n"
@@ -1995,7 +2026,7 @@ def callback_signal_tf(call):
     try:
         is_crypto = symbol in VALID_CRYPTO_SYMBOLS
         asset_type = 'crypto' if is_crypto else 'forex'
-        analysis_data, chart_img, error = generate_technical_analysis(symbol, tf, asset_type)
+        analysis_data, _, error = generate_technical_analysis(symbol, tf, asset_type)
         
         if error:
             bot.send_message(user_id, error, parse_mode='Markdown')
@@ -2006,11 +2037,9 @@ def callback_signal_tf(call):
                 parse_mode='Markdown'
             )
         else:
+            # فقط متن سیگنال ارسال می‌شود، بدون عکس
             signal_text = generate_crypto_signal(symbol, analysis_data)
-            if chart_img:
-                bot.send_photo(user_id, chart_img, caption=signal_text, parse_mode='Markdown')
-            else:
-                bot.send_message(user_id, signal_text, parse_mode='Markdown')
+            bot.send_message(user_id, signal_text, parse_mode='Markdown')
         
         user_signal_symbol.pop(user_id, None)
         waiting_for_signal.pop(user_id, None)
