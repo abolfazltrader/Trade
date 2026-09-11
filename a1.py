@@ -43,6 +43,10 @@ RATE_LIMIT_PERIOD = 60
 
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
 OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
+# محیط Practice (دمو) — وقتی حساب واقعی گرفتی این آدرس رو به
+# https://api-fxtrade.oanda.com تغییر بده
+OANDA_BASE_URL = os.environ.get("OANDA_BASE_URL", "https://api-fxpractice.oanda.com")
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -405,6 +409,90 @@ def get_crypto_price_by_symbol(symbol):
     except Exception:
         return None
 
+# ========== نگاشت نمادها به فرمت OANDA ==========
+OANDA_INSTRUMENT_MAP = {
+    "EURUSD": "EUR_USD",
+    "GBPUSD": "GBP_USD",
+    "USDJPY": "USD_JPY",
+    "AUDUSD": "AUD_USD",
+    "USDCAD": "USD_CAD",
+    "NZDUSD": "NZD_USD",
+    "CHFJPY": "CHF_JPY",
+    "XAUUSD": "XAU_USD",
+}
+
+
+def _get_oanda_price(symbol):
+    """دریافت قیمت لحظه‌ای دقیق (bid/ask) از OANDA v20 API"""
+    if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
+        return None
+
+    instrument = OANDA_INSTRUMENT_MAP.get(symbol)
+    if not instrument:
+        return None
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {OANDA_API_KEY}",
+            "Accept-Datetime-Format": "RFC3339",
+        }
+
+        # قیمت لحظه‌ای (bid/ask)
+        pricing_url = f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/pricing"
+        resp = requests.get(
+            pricing_url,
+            headers=headers,
+            params={"instruments": instrument},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"OANDA pricing failed for {symbol}: {resp.status_code} {resp.text[:200]}")
+            return None
+
+        data = resp.json()
+        prices = data.get("prices", [])
+        if not prices:
+            return None
+
+        p = prices[0]
+        bid = float(p["bids"][0]["price"]) if p.get("bids") else None
+        ask = float(p["asks"][0]["price"]) if p.get("asks") else None
+        if bid is None or ask is None:
+            return None
+        mid_price = round((bid + ask) / 2, 5)
+
+        # درصد تغییر نسبت به کلوز روز قبل (از کندل روزانه)
+        change = 0
+        try:
+            candles_url = f"{OANDA_BASE_URL}/v3/instruments/{instrument}/candles"
+            c_resp = requests.get(
+                candles_url,
+                headers=headers,
+                params={"granularity": "D", "count": 2, "price": "M"},
+                timeout=5,
+            )
+            if c_resp.status_code == 200:
+                candles = c_resp.json().get("candles", [])
+                if len(candles) >= 2:
+                    prev_close = float(candles[-2]["mid"]["c"])
+                    if prev_close:
+                        change = ((mid_price - prev_close) / prev_close) * 100
+        except Exception as e:
+            logger.warning(f"OANDA candle fetch failed for {symbol}: {e}")
+
+        return {
+            "price": mid_price,
+            "bid": bid,
+            "ask": ask,
+            "spread": round(ask - bid, 5),
+            "change": round(change, 2),
+            "source": "OANDA",
+        }
+    except Exception as e:
+        logger.warning(f"OANDA price fetch error for {symbol}: {e}")
+        return None
+
+
 # ========== دریافت قیمت فارکس ==========
 def get_forex_price(symbol="EURUSD"):
     cache_key = f"forex_price_{symbol}"
@@ -412,6 +500,14 @@ def get_forex_price(symbol="EURUSD"):
     if cached:
         return cached
 
+    # ---------- منبع اصلی: OANDA (دقیق‌ترین، bid/ask واقعی) ----------
+    oanda_result = _get_oanda_price(symbol)
+    if oanda_result:
+        fetcher._set_cache(cache_key, oanda_result)
+        logger.info(f"Forex price from OANDA: {symbol} = {oanda_result['price']} (bid={oanda_result['bid']}, ask={oanda_result['ask']})")
+        return oanda_result
+
+    # ---------- Fallback 1: Yahoo Finance ----------
     try:
         session = requests.Session()
         session.headers.update({
@@ -431,6 +527,7 @@ def get_forex_price(symbol="EURUSD"):
     except Exception as e:
         logger.warning(f"Yahoo Finance failed for {symbol}: {e}")
 
+    # ---------- Fallback 2: exchangerate-api ----------
     try:
         if symbol == "XAUUSD":
             from_currency = "XAU"
@@ -451,26 +548,6 @@ def get_forex_price(symbol="EURUSD"):
                 return result
     except Exception as e:
         logger.warning(f"exchangerate-api failed for {symbol}: {e}")
-
-    if OANDA_API_KEY:
-        try:
-            if symbol == "XAUUSD":
-                oanda_symbol = "XAU_USD"
-            else:
-                oanda_symbol = symbol[:3] + "_" + symbol[3:6] if len(symbol) >= 6 else symbol
-            url = f"https://api-fxtrade.oanda.com/v1/prices?instruments={oanda_symbol}"
-            headers = {'Authorization': f'Bearer {OANDA_API_KEY}'}
-            resp = requests.get(url, headers=headers, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get('prices'):
-                    price = float(data['prices'][0]['bid'])
-                    result = {'price': price, 'change': 0, 'source': 'OANDA'}
-                    fetcher._set_cache(cache_key, result)
-                    logger.info(f"Forex price from OANDA: {symbol} = {price}")
-                    return result
-        except Exception as e:
-            logger.warning(f"OANDA failed for {symbol}: {e}")
 
     return None
 
@@ -1976,21 +2053,33 @@ def callback_price(call):
     elif data == "price_eurusd":
         info = get_forex_price("EURUSD")
         if info:
-            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🇪🇺 **EUR/USD**\n💰 قیمت: {info['price']:,.5f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('bid') and info.get('ask'):
+                reply += f"📥 Bid: {info['bid']:,.5f} | 📤 Ask: {info['ask']:,.5f}\n"
+                reply += f"↔️ اسپرد: {info['spread']:.5f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت EUR/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_gbpusd":
         info = get_forex_price("GBPUSD")
         if info:
-            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.4f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🇬🇧 **GBP/USD**\n💰 قیمت: {info['price']:,.5f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('bid') and info.get('ask'):
+                reply += f"📥 Bid: {info['bid']:,.5f} | 📤 Ask: {info['ask']:,.5f}\n"
+                reply += f"↔️ اسپرد: {info['spread']:.5f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت GBP/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
     elif data == "price_gold":
         info = get_forex_price("XAUUSD")
         if info:
-            reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n📌 منبع: {info.get('source', 'نامشخص')}"
+            reply = f"🥇 **XAU/USD**\n💰 قیمت: {info['price']:,.2f} $\n📊 تغییر ۲۴h: {info['change']:.2f}%\n"
+            if info.get('bid') and info.get('ask'):
+                reply += f"📥 Bid: {info['bid']:,.2f} | 📤 Ask: {info['ask']:,.2f}\n"
+                reply += f"↔️ اسپرد: {info['spread']:.2f}\n"
+            reply += f"📌 منبع: {info.get('source', 'نامشخص')}"
         else:
             reply = "❌ قیمت XAU/USD در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید."
 
